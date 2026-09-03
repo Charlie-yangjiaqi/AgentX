@@ -7,11 +7,21 @@ from dataclasses import dataclass, field
 
 @dataclass
 class KeilFile:
-    """Keil 工程中的一个源文件。"""
+    """Keil 工程中的一个源文件。
 
-    path: str  # 工程内相对路径（/ 分隔）
+    path: 规范化路径——提供 project_root 时解析为工程相对路径（正斜杠）；
+          否则退回 FileName（Keil 可能只给裸文件名）。
+    raw: 工程文件里 FilePath/FileName 原文（诊断/回溯用）。
+    file_path: FilePath 原文（有则用，无则与 raw 同）；project_root 解析前的原始相对路径。
+    compiled: IncludeInBuild != 0
+    group: 所属 Group 名
+    """
+
+    path: str  # 规范化路径（工程相对或裸名）
     compiled: bool  # IncludeInBuild != 0
     group: str = ""
+    raw: str = ""
+    file_path: str = ""
 
 
 @dataclass

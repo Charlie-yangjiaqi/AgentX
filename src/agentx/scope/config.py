@@ -37,6 +37,15 @@ LEGACY_IGNORE_FILENAME = ".agentxignore"
 SCOPE_PROJECT = "project"
 SCOPE_THIRD_PARTY = "third_party"
 SCOPE_IGNORED = "ignored"
+SCOPE_NON_BUILD = "non_build"  # Phase 7.10：自有代码但不在当前 Keil Target（≠第三方≠ignore）
+
+
+def _norm_base(raw: str) -> str:
+    """归一化第三方/ignore 路径基准：去引号、正斜杠、去尾 /**（glob 写法兼容）。"""
+    base = _unquote(raw).replace("\\", "/").strip("/")
+    if base.endswith("/**"):
+        base = base[: -len("/**")].rstrip("/")
+    return base
 
 
 def _unquote(value: str) -> str:
@@ -44,6 +53,15 @@ def _unquote(value: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
         return value[1:-1]
     return value
+
+
+def normalize_scope_path(raw: str) -> str:
+    """第三方/ignore 路径归一化：去引号、正斜杠、去首尾斜杠与尾 /**。
+
+    写入 .agentxscope.yaml 前调用，保证第三方的 dir/** 与裸 dir 都落成 dir，
+    matcher 前缀语义一致（Phase 7.10 修复：/** 形式此前导致第三方匹配失效）。
+    """
+    return _norm_base(raw)
 
 
 def _parse_third_party(item: Any) -> dict[str, str] | None:
@@ -55,26 +73,34 @@ def _parse_third_party(item: Any) -> dict[str, str] | None:
                 item = _unquote(value)
             else:
                 return None
-        path = item.strip("/")
+        path = normalize_scope_path(item)
         if not path:
             return None
         return {"path": path, "name": path.rsplit("/", 1)[-1]}
     if isinstance(item, dict):
-        path = str(item.get("path", "")).strip("/")
+        path = normalize_scope_path(str(item.get("path", "")))
         if not path:
             return None
-        name = str(item.get("name") or path.rsplit("/", 1)[-1]).strip()
+        name = str(item.get("name") or "").strip()
+        # 兼容历史错误 name（旧 wizard 从 "Middlewares/**" 推导出 "**"）→ 由路径重推
+        if not name or name == "**":
+            name = path.rsplit("/", 1)[-1]
         return {"path": path, "name": name}
     return None
 
 
 def parse_scope_config(text: str, legacy_ignore: str | None = None) -> dict[str, Any]:
-    """解析 .agentxscope.yaml（简单 YAML 子集）；兼容旧 .agentxignore。"""
+    """解析 .agentxscope.yaml（简单 YAML 子集）；兼容旧 .agentxignore。
+
+    支持 build 段（Phase 7.10）：build: { target: LVGL } —— 用户确认的
+    Keil Active Target，供 Build Scope 决策。
+    """
     config: dict[str, Any] = {
         "project_include": [],
         "project_include_set": False,
         "third_party": [],
         "ignore": [],
+        "build_target": None,
     }
 
     third_party: list[dict[str, str]] = []
@@ -86,7 +112,13 @@ def parse_scope_config(text: str, legacy_ignore: str | None = None) -> dict[str,
     def _flush_third() -> None:
         nonlocal third_item
         if third_item is not None:
-            third_party.append(third_item)
+            path = _norm_base(str(third_item.get("path", "")))
+            if path:
+                name = str(third_item.get("name") or "").strip()
+                if not name or name == "**":  # 兼容历史错误 name（旧 wizard 产物）
+                    name = path.rsplit("/", 1)[-1]
+                third_item = {"path": path, "name": name}
+                third_party.append(third_item)
             third_item = None
 
     for line in text.splitlines():
@@ -98,8 +130,20 @@ def parse_scope_config(text: str, legacy_ignore: str | None = None) -> dict[str,
             if name in ("project", "third_party", "ignore"):
                 _flush_third()
                 section = name
+            elif name == "build":
+                _flush_third()
+                section = "build"
             continue
         if section is None:
+            continue
+        if section == "build":
+            # build: { target: LVGL }（单行内联）或 build:\n  target: LVGL
+            if ":" in stripped:
+                key, _, value = stripped.partition(":")
+                if key.strip() == "target":
+                    val = _unquote(value).strip()
+                    if val:
+                        config["build_target"] = val
             continue
         if stripped.startswith("-"):
             item = stripped[1:].strip()
@@ -168,14 +212,20 @@ def _glob_match(rel_path: str, pattern: str) -> bool:
 def scope_of_file(rel_path: str, config: dict[str, Any]) -> tuple[str, str | None]:
     """文件分类：返回 (scope_type, scope_name)。ignored 文件 scope_name=None。
 
-    优先级：ignore > third_party > project。
+    优先级：ignore > third_party > project（Build Scope 位于更上层，见 build_scope）。
+
+    third_party 兼容两种书写：裸目录（Middlewares/LVGL）与 glob 写法
+    （Middlewares/LVGL/** 归一化后同样命中）。归一化在 parse 时完成，
+    此处对历史/外部配置再兜底一次。
     """
     p = rel_path.replace("\\", "/").strip("/")
     for pat in config.get("ignore", []):
         if _glob_match(p, pat):
             return SCOPE_IGNORED, None
     for tp in config.get("third_party", []):
-        base = tp.get("path", "").strip("/")
+        base = _norm_base(str(tp.get("path", "")))
+        if not base:
+            continue
         if p == base or p.startswith(base + "/"):
             return SCOPE_THIRD_PARTY, tp.get("name")
     if config.get("project_include_set"):

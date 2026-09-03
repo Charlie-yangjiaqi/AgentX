@@ -3,11 +3,13 @@
 解析范围（Phase 7.5，只提供事实，不做预处理）：
 - Targets：name / cpu / device / defines（宏列表，不推断代码分支）
 - Groups：工程组织（group → files）
-- Files：compiled（IncludeInBuild != 0）vs excluded
+- Files：compiled（IncludeInBuild != 0）vs excluded；读 FileName + FilePath，
+  project_root 提供时把 FilePath 解析为工程相对路径（Build Scope 前提，
+  Phase 7.10：Keil 实际编译文件优先）
 - active target 规则（锁死，不猜）：
-    1. 工程内 SelectTargetNo（MDK 标记的当前 Target 索引）
-    2. 第一个 Target
-    3. 调用方显式指定 target_name 参数（优先级最高）
+    1. 调用方显式指定 target_name 参数（优先级最高）
+    2. 工程内 SelectTargetNo（MDK 标记的当前 Target 索引）
+    3. 第一个 Target
 """
 
 from __future__ import annotations
@@ -21,15 +23,23 @@ __all__ = ["KeilFile", "KeilGroup", "KeilProject", "KeilTarget", "parse_keil_pro
 
 
 def parse_keil_project(
-    project_path: Path, target_name: str | None = None
+    project_path: Path, target_name: str | None = None, project_root: Path | None = None
 ) -> KeilProject:
-    """解析 uvprojx/uvproj；解析失败返回空工程（不抛异常，不编造）。"""
+    """解析 uvprojx/uvproj；解析失败返回空工程（不抛异常，不编造）。
+
+    project_root：工程根目录。提供时把每个 File 的 FilePath（相对 .uvprojx）
+    归一化为工程相对路径（正斜杠），供 Build Scope 精确匹配；无法归一时
+    退回 FileName 原文。缺省时 path=FileName（兼容旧调用方/旧测试）。
+    """
     project = KeilProject(project_file=str(project_path))
     try:
         tree = ET.parse(project_path)
     except (ET.ParseError, OSError):
         return project
     root_el = tree.getroot()
+
+    proj_dir = project_path.resolve().parent
+    root_resolved = project_root.resolve() if project_root is not None else None
 
     targets: list[KeilTarget] = []
     for target_el in root_el.iter("Target"):
@@ -38,7 +48,7 @@ def parse_keil_project(
         if not name:
             # 兼容无 TargetName 的简化/旧结构：默认名，仍解析其 Groups
             name = "default"
-        target = _parse_target(name, target_el)
+        target = _parse_target(name, target_el, proj_dir, root_resolved)
         targets.append(target)
 
     project.targets = targets
@@ -62,7 +72,45 @@ def parse_keil_project(
     return project
 
 
-def _parse_target(name: str, target_el: ET.Element) -> KeilTarget:
+def _resolve_path(
+    fp_raw: str, fn_raw: str, proj_dir: Path, root_resolved: Path | None
+) -> str:
+    """File 路径归一化 → 工程相对路径（正斜杠）；失败退回可用的原文。
+
+    优先级：FilePath（相对 .uvprojx，可含 ..）→ 相对工程根；
+    无 project_root → 相对 .uvprojx 目录；绝对盘符/UNC/越界 → FileName 兜底。
+    """
+    fp_raw = (fp_raw or "").strip().replace("\\", "/")
+    fn_raw = (fn_raw or "").strip().replace("\\", "/")
+    for marker in ("$PROJ_DIR$", "$PROJ$"):
+        fp_raw = fp_raw.replace(marker, ".")
+    candidate = fp_raw or fn_raw
+    if not candidate:
+        return ""
+    # 绝对路径（/ 开头或盘符/UNC）→ 无法相对化，退回 FileName
+    if candidate.startswith("/") or (len(candidate) > 1 and candidate[1] == ":"):
+        return fn_raw or candidate
+    try:
+        abs_p = (proj_dir / candidate).resolve()
+    except OSError:
+        return fn_raw or candidate
+    if root_resolved is not None:
+        try:
+            return str(abs_p.relative_to(root_resolved)).replace("\\", "/")
+        except ValueError:
+            return fn_raw or candidate  # 越出工程根：退回 FileName
+    try:
+        return str(abs_p.relative_to(proj_dir)).replace("\\", "/")
+    except ValueError:
+        return fn_raw or candidate
+
+
+def _parse_target(
+    name: str,
+    target_el: ET.Element,
+    proj_dir: Path,
+    root_resolved: Path | None,
+) -> KeilTarget:
     cpu: str | None = None
     device: str | None = None
     defines: list[str] = []
@@ -86,17 +134,24 @@ def _parse_target(name: str, target_el: ET.Element) -> KeilTarget:
         gname = gname_el.text.strip() if gname_el is not None and gname_el.text else ""
         files: list[KeilFile] = []
         for file_el in group_el.iter("File"):
-            fname_el = file_el.find("FileName")
-            if fname_el is None or not fname_el.text:
-                continue
-            fname = fname_el.text.strip().replace("\\", "/")
-            if not fname:
+            fn_el = file_el.find("FileName")
+            fn_raw = fn_el.text.strip() if fn_el is not None and fn_el.text else ""
+            fp_el = file_el.find("FilePath")
+            fp_raw = fp_el.text.strip() if fp_el is not None and fp_el.text else ""
+            if not fn_raw and not fp_raw:
                 continue
             include_in_build = True
             for fo in file_el.iter("IncludeInBuild"):
                 if fo.text and fo.text.strip() == "0":
                     include_in_build = False
-            files.append(KeilFile(path=fname, compiled=include_in_build, group=gname))
+            path = _resolve_path(fp_raw, fn_raw, proj_dir, root_resolved)
+            raw = fn_raw
+            file_path = fp_raw or fn_raw
+            files.append(
+                KeilFile(
+                    path=path, compiled=include_in_build, group=gname, raw=raw, file_path=file_path
+                )
+            )
         groups.append(KeilGroup(name=gname, files=files))
 
     return KeilTarget(
