@@ -95,10 +95,11 @@ def compute_quality(index: ProjectIndex) -> dict[str, Any]:
 
 
 def compute_scope_report(index: ProjectIndex) -> dict[str, Any]:
-    """Scope Report（Phase 7.8 三层统计）：project/third_party 文件与符号 + 模块分类。"""
+    """Scope Report（Phase 7.8 三层 + Phase 7.10 non_build）统计。"""
     files = index.files
     project_files = [f for f in files if getattr(f, "scope_type", "project") == "project"]
     third_files = [f for f in files if getattr(f, "scope_type", "project") == "third_party"]
+    non_build_files = [f for f in files if getattr(f, "scope_type", "project") == "non_build"]
 
     third_by_name: dict[str, dict[str, Any]] = {}
     for f in third_files:
@@ -111,21 +112,26 @@ def compute_scope_report(index: ProjectIndex) -> dict[str, Any]:
             entry = third_by_name.setdefault(name, {"files": 0, "symbols": 0})
             entry["symbols"] += 1
 
-    project_symbols = sum(1 for s in index.symbols if s.get("scope_type") != "third_party")
+    project_symbols = sum(1 for s in index.symbols if s.get("scope_type") == "project")
     third_symbols = sum(e["symbols"] for e in third_by_name.values())
+    non_build_symbols = sum(1 for s in index.symbols if s.get("scope_type") == "non_build")
 
     modules = index.modules or []
-    project_modules = [m for m in modules if m.get("scope_type") != "third_party"]
+    project_modules = [m for m in modules if m.get("scope_type") == "project"]
     third_modules = [m for m in modules if m.get("scope_type") == "third_party"]
+    non_build_modules = [m for m in modules if m.get("scope_type") == "non_build"]
 
     return {
         "project_files": len(project_files),
         "project_symbols": project_symbols,
+        "non_build_files": len(non_build_files),
+        "non_build_symbols": non_build_symbols,
         "third_party": {name: entry for name, entry in sorted(third_by_name.items())},
         "third_party_files": len(third_files),
         "third_party_symbols": third_symbols,
         "project_modules": len(project_modules),
         "third_party_modules": len(third_modules),
+        "non_build_modules": len(non_build_modules),
         # 检查项：third_party 模块数 > 第三方目录数 = 冻结失败
         "third_party_module_overflow": len(third_modules) > len(third_by_name),
     }
@@ -169,6 +175,11 @@ def format_scope_report(scope: dict[str, Any]) -> str:
         f"  Third Party total: files={scope['third_party_files']} "
         f"symbols={scope['third_party_symbols']} modules={scope['third_party_modules']}"
     )
+    if scope.get("non_build_files") is not None:
+        lines.append(
+            f"  Non-build: files={scope['non_build_files']} "
+            f"symbols={scope['non_build_symbols']} modules={scope['non_build_modules']}"
+        )
     if scope.get("third_party_module_overflow"):
         lines.append("  [WARN] third_party 模块数 > 第三方目录数（冻结失败，请检查 Scope 配置）")
     return "\n".join(lines)

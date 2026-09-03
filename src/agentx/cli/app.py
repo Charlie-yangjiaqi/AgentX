@@ -442,6 +442,38 @@ def _ask_extra(label: str) -> list[str]:
     return [p.strip() for p in raw.split(",") if p.strip()]
 
 
+def _resolve_build_target(root: Path, *, yes: bool = False) -> None:
+    """Phase 7.10：Keil 多 Target 引导。确认当前分析固件 Target 并持久化。
+
+    - 无 Keil/单 Target → 无操作
+    - 已配置 build.target → 无操作
+    - 多 Target → 交互/--yes 选择并写入 scope config（不自动猜）
+    """
+    from agentx.scope.initializer import apply_scope_selections, check_build_target_init
+
+    gate = check_build_target_init(root)
+    if gate is None:
+        return
+    targets = gate["build_targets"]
+    typer.echo("Keil 工程含多个 Target，需要确认当前分析的固件：")
+    for i, t in enumerate(targets, 1):
+        typer.echo(f"  {i}. {t}")
+    choice: str = ""
+    if yes:
+        choice = targets[0]
+    else:
+        raw = typer.prompt("选择 Target 编号/名称", default="1").strip()
+        if raw.isdigit() and 1 <= int(raw) <= len(targets):
+            choice = targets[int(raw) - 1]
+        elif raw in targets:
+            choice = raw
+    if not choice:
+        typer.echo("未选择 Target（可稍后运行 agentx init 重新引导）。")
+        return
+    apply_scope_selections(root, {"build_target": choice})
+    typer.echo(f"已确认 Keil Target: {choice}（后续分析以该 Target 编译文件为主 Index 边界）")
+
+
 @app.command("doctor")
 def doctor(
     path: Path = typer.Option(".", "--path", "-p", help="项目目录"),
@@ -641,6 +673,7 @@ def sync(
         return
     if wizard == "written":
         typer.echo("首次初始化：Scope 配置已生成，开始建立 Index...")
+    _resolve_build_target(root)
     result = sync_index(root, origin=origin, progress=lambda m: typer.echo(f"  {m}"))
     typer.echo(f"\nLevel: {result['level']} | action: {result['action']}")
     typer.echo(f"变化文件: {result['changed_files'] or '无'}")
@@ -822,6 +855,7 @@ def understand(
         return
     if wizard == "written":
         typer.echo("首次初始化：Scope 配置已生成，开始建立 Index...")
+    _resolve_build_target(root)
     ensure_index(root)
     index = load_index(root)
     if index is None:
@@ -879,6 +913,7 @@ def plan(
         return
     if wizard == "written":
         typer.echo("首次初始化：Scope 配置已生成，开始建立 Index...")
+    _resolve_build_target(application.project_root)
     collector = EventCollector()
     listener, heartbeat_printer = _make_live_printer()
     collector.subscribe(listener)
@@ -1131,6 +1166,7 @@ def init(
         typer.echo("未采纳任何建议（全部按 project 分析）。")
     elif result == "":
         typer.echo("未发现第三方库或需要忽略的目录（全部按 project 分析）。")
+    _resolve_build_target(root, yes=yes)
     application.store.close()
 
 

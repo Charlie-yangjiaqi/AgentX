@@ -183,21 +183,37 @@ def ensure_index(
     (MISSING, "scope_required", None)；调用方需携带 scope_selections
     确认（或由上层向导先生成配置）后重试。
 
+    Build Target 前置条件（Phase 7.10）：Keil 多 Target 且未确认分析目标时
+    返回 (MISSING, "build_target_required", None)（不自动猜）；scope_selections
+    可携带 build_target 持久化选择。
+
     返回 (处理前状态, 说明, 当前 Index)。规则：
-    - scope gate 拦截 → Index 为 None（未建立）
+    - scope/build_target gate 拦截 → Index 为 None（未建立）
     - MISSING / CORRUPTED → 创建
     - STALE → 刷新（保留已有认知）
     - VALID → 直接复用
     - force_rebuild=True → 显式重建（用户意图，优先级最高）
     """
     root = project_root.resolve()
-    from agentx.scope.initializer import apply_scope_selections, check_scope_init
+    from agentx.scope.initializer import (
+        apply_scope_selections,
+        check_build_target_init,
+        check_scope_init,
+    )
 
     gate = check_scope_init(root)
     if gate is not None and scope_selections is None:
         return IndexStatus.MISSING, "scope_required", None
     if gate is not None:
         apply_scope_selections(root, scope_selections)
+
+    btg = check_build_target_init(root)
+    if btg is not None and scope_selections and scope_selections.get("build_target"):
+        # 用户已确认目标 Target → 持久化到 scope config，解除门禁
+        apply_scope_selections(root, scope_selections)
+        btg = check_build_target_init(root)
+    if btg is not None:
+        return IndexStatus.MISSING, "build_target_required", None
 
     status, reason = index_status(root)
     if force_rebuild:
@@ -293,69 +309,72 @@ def enrich_index(project_root: Path) -> tuple[ProjectIndex, ProjectGraph]:
             return "excluded"
         return "not_compiled" if has_build else "unknown"
 
+    # Phase 7.10 Build Scope：以 Keil Active Target source list 为主 Index 工程边界。
+    # 文件分类优先级：ignored > third_party > build-project > non_build。
+    # build 解析失败/多 Target 未确认 → build_scope 记录 unresolved（不伪装），
+    # 文件分类退回 scope 目录规则（兼容旧行为）。
+    from agentx.scope.build_scope import (
+        build_scope_summary,
+        classify_build_scope,
+        resolve_keil_build,
+    )
+
+    build_view = resolve_keil_build(root)
+
+    # 候选文件全集 = CodeGraph/扫描文件 ∪ 磁盘源码（后续按 Build Scope 分类）
+    from agentx.index.fingerprint import relevant_files as _rf
+    from agentx.index.index import index_exclude_name
+
+    graph_paths = {str(f.get("path", "")) for f in graph.files if f.get("path")}
+    all_files = set(_rf(root, extra_excludes={index_exclude_name(root)}))
+    candidates = sorted(graph_paths | all_files)
+
+    # ignored 已被 classify 丢弃；classified 只含 project/third_party/non_build
+    classified = classify_build_scope(root, candidates, build_view, graph.include_map)
+    scope_of_path = {p: v for p, v in classified.items()}
+
     files: list[dict[str, Any]] = []
-    for fmeta in graph.files:
-        path = str(fmeta.get("path", ""))
+    for path in sorted(scope_of_path):
         base = path.split("/")[-1]
+        in_graph = path in graph_paths
+        sc = scope_of_path[path]
         files.append(
             {
                 "path": path,
-                "status": "active",
+                "status": "active" if in_graph else "orphaned",
                 "compiled": base in compiled,
                 "compile_status": _compile_status(base),
                 "build_source": build_source,
                 "content_hash": _content_hash(path),
-                "referenced": True,
-                "scope_type": str(fmeta.get("scope_type", "project") or "project"),
-                "scope_name": fmeta.get("scope_name"),
+                "referenced": in_graph,
+                "scope_type": sc["scope_type"],
+                "scope_name": sc.get("scope_name"),
             }
         )
-    # 存在于项目但 CodeGraph 未收录的源码 → orphaned（构建配置类保持 active）
-    from agentx.index.fingerprint import SOURCE_EXTS
-    from agentx.index.fingerprint import relevant_files as _rf
-    from agentx.index.index import index_exclude_name
-    from agentx.scope.resolver import ScopeResolver
 
-    resolver = ScopeResolver(root)
-    all_files = set(_rf(root, extra_excludes={index_exclude_name(root)}))
-    known = {str(f.get("path", "")) for f in graph.files}
-    for f in sorted(all_files - known):
-        ext = Path(f).suffix.lower()
-        if ext in SOURCE_EXTS:
-            if resolver.is_ignored(f):
-                continue  # ignore 文件完全不进入 Index
-            base = f.split("/")[-1]
-            from agentx.scope.config import scope_of_file
-
-            scope_type, scope_name = scope_of_file(f, resolver.config)
-            files.append(
-                {
-                    "path": f,
-                    "status": "orphaned",
-                    "compiled": False,
-                    "compile_status": _compile_status(base),
-                    "build_source": build_source,
-                    "content_hash": _content_hash(f),
-                    "scope_type": scope_type,
-                    "scope_name": scope_name,
-                }
-            )
+    build_scope_note = build_scope_summary(build_view, classified, 0)
+    build_info = {**build_info, "build_scope": build_scope_note}
 
     old = load_index(root)
     # Phase 7.6：Tree-sitter 语义补充（signature/struct members/enum values/macro）
     # 能力状态显式化：semantic 不可用 → capabilities 标记 + errors 记录，不静默生成假成功 Index
+    # Phase 7.10：semantic 只对 Build Scope 内（project）文件提取——禁止先对全项目
+    # 建 semantic 再过滤（否则主 Index 被非编译代码污染）。CodeGraph symbols/call_graph
+    # 是原始事实保留，第三方/non_build 不跑文件级 semantic。
     capabilities: dict[str, Any] = {"module": {"enabled": True}}
     semantic_errors: list[str] = []
+    scope_of_path = {str(f["path"]): f for f in files}
+    project_paths = {
+        str(f["path"]) for f in files if str(f.get("scope_type", "project")) == "project"
+    }
     if graph.source == "codegraph":
         indirect_calls: list[dict[str, Any]] = []
         try:
             from agentx.semantic.extractor import _PARSER_SOURCE
             from agentx.semantic.merge import merge_semantics
 
-            source_paths = sorted(
-                {str(f.get("path", "")) for f in graph.files}
-                | {str(f.get("path", "")) for f in files}
-            )
+            # 只对主边界（project）文件做文件级语义；CodeGraph 全量符号仍保留
+            source_paths = sorted(project_paths)
             symbols, semantic_errors, indirect_calls, semantics = merge_semantics(
                 graph.symbols, root, source_paths
             )
@@ -398,8 +417,22 @@ def enrich_index(project_root: Path) -> tuple[ProjectIndex, ProjectGraph]:
             "reason": "CodeGraph 不可用（filescan 模式），语义提取未运行",
             "parser": None,
         }
+    # Phase 7.10：build_scope 能力状态（resolved/ambiguity/unknown 显式化）
+    capabilities["build_scope"] = {
+        "enabled": build_view.resolved,
+        "reason": (
+            None
+            if build_view.resolved
+            else (
+                "多 Target 未确认（build_target_required）"
+                if build_view.ambiguity
+                else "无 Keil 工程或 Build 解析失败（build_scope_unknown）"
+            )
+        ),
+        "target": build_view.target,
+        "targets": build_view.targets,
+    }
     # Phase 7.8：符号标注 scope_type（semantic 数据标记，供 Memory 判断业务/第三方）
-    scope_of_path = {str(fmeta.get("path", "")): fmeta for fmeta in files}
     for s in symbols:
         f = str(s.get("file", ""))
         meta = scope_of_path.get(f)
@@ -459,6 +492,17 @@ def _index_preview(index: ProjectIndex, max_files: int = 60) -> str:
         )
     if index.build_info:
         bi = index.build_info
+        # Build Scope（Phase 7.10）：project/third_party/non_build 边界摘要
+        bs = bi.get("build_scope") or {}
+        if bs.get("resolved"):
+            lines.append(
+                f"Build Scope: target={bs.get('target')} build_files={bs.get('build_files')} "
+                f"project={bs.get('project')} non_build={bs.get('non_build')} "
+                f"third_party={bs.get('third_party')}"
+            )
+        elif bs:
+            state = "multi-target" if bs.get("ambiguity") else "build parse failed"
+            lines.append(f"Build Scope: UNRESOLVED（{state}）")
         # 只给摘要（target/统计/defines），不注入 compiled_files/excluded_files 全量
         summary = {
             "system": bi.get("system"),
@@ -555,9 +599,27 @@ class PlanService:
             root, force_rebuild=force_rebuild, scope_selections=scope_selections
         )
         if _ is None:
-            # Scope 前置条件未满足：不建立 Index（gate 由 ensure_index 内部判定）
-            from agentx.scope.initializer import check_scope_init
+            from agentx.scope.initializer import (
+                check_build_target_init,
+                check_scope_init,
+            )
 
+            if before_reason == "build_target_required":
+                # Phase 7.10：Keil 多 Target 未确认 → build_target_required（不自动猜）
+                gate = check_build_target_init(root) or {}
+                emit("index_check", "completed", "build_target_required")
+                return {
+                    "index_scope": "build_target_required",
+                    "status": "build_target_required",
+                    "reason": gate.get("reason", "keil_multi_target_unselected"),
+                    "message": gate.get("message", "Need user confirm current Keil target"),
+                    "build_targets": gate.get("build_targets", []),
+                    "build_files": gate.get("build_files", 0),
+                    "project_file": gate.get("project_file"),
+                    "index_before": {"status": str(before_status), "reason": before_reason},
+                    "index_after": {"status": "build_target_required", "reason": "Index 未建立"},
+                }
+            # Scope 前置条件未满足：不建立 Index（gate 由 ensure_index 内部判定）
             gate = check_scope_init(root) or {}
             emit("index_check", "completed", "scope_required")
             return {

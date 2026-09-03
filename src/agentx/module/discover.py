@@ -211,40 +211,57 @@ def discover_modules(index: ProjectIndex) -> list[dict[str, Any]]:
 
     Phase 7.8：Scope 配置声明的 third_party 文件 → 冻结模块（单模块，不拆分、
     不参与 prefix 聚类/merge）；project 文件走完整 discover 流程。
+
+    Phase 7.10：non_build（自有但不在当前 Keil Target 编译）文件不进主 project
+    模块发现——按顶层目录冻结为非主模块（scope_type=non_build），避免非编译
+    代码污染主 Index 的模块主链。
     """
     file_metas = index.files
     symbols = index.symbols
     build_info = index.build_info or {}
     groups = build_info.get("groups") or []
 
-    # Step 0：third_party 冻结模块（配置驱动，文件带 scope_type/scope_name）
+    # Step 0：third_party / non_build 冻结模块（配置+Build Scope 驱动）
     frozen: dict[str, dict[str, Any]] = {}
+    frozen_byname: dict[str, dict[str, Any]] = {}
     project_metas: list[Any] = []
+
+    def _freeze(name: str, scope_type: str) -> dict[str, Any]:
+        key = f"{scope_type}:{name.casefold()}"
+        mod = frozen_byname.get(key)
+        if mod is None:
+            mod = {
+                "name": name,
+                "type": "unknown",
+                "files": [],
+                "symbols": [],
+                "entry_points": [],
+                "responsibilities": "",
+                "dependencies": [],
+                "consumers": [],
+                "build_status": "unknown",
+                "scope_type": scope_type,
+                "third_party": scope_type == "third_party",
+                "confidence": 0.9,
+                "evidence": {"basis": []},
+            }
+            frozen_byname[key] = mod
+        return mod
+
     for fmeta in file_metas:
         scope_type = str(getattr(fmeta, "scope_type", "project") or "project")
         if scope_type == "third_party":
             tp_name = str(fmeta.scope_name or fmeta.path.split("/")[0])
-            mod = frozen.get(tp_name)
-            if mod is None:
-                mod = {
-                    "name": tp_name,
-                    "type": "unknown",
-                    "files": [],
-                    "symbols": [],
-                    "entry_points": [],
-                    "responsibilities": "",
-                    "dependencies": [],
-                    "consumers": [],
-                    "build_status": "unknown",
-                    "scope_type": "third_party",
-                    "third_party": True,
-                    "confidence": 0.9,
-                    "evidence": {"basis": []},
-                }
-                frozen[tp_name] = mod
+            mod = _freeze(tp_name, "third_party")
+            mod["files"].append(fmeta.path)
+        elif scope_type == "non_build":
+            # 非编译自有代码：不参与主模块发现；按顶层目录冻结为独立非主模块
+            top = fmeta.path.replace("\\", "/").split("/", 1)[0] or fmeta.path
+            mod = _freeze(f"{top} (non-build)", "non_build")
             mod["files"].append(fmeta.path)
         else:
             project_metas.append(fmeta)
+    frozen = frozen_byname
 
     file_paths = [f.path for f in file_metas]
 
@@ -334,11 +351,11 @@ def discover_modules(index: ProjectIndex) -> list[dict[str, Any]]:
                 else:
                     name = _stem(path)
         key = name.casefold()
-        mod = modules.get(key)
-        if mod is None:
-            mod = _new_module(name, group)
-            modules[key] = mod
-        mod["files"].append(path)
+        proj_mod = modules.get(key)
+        if proj_mod is None:
+            proj_mod = _new_module(name, group)
+            modules[key] = proj_mod
+        proj_mod["files"].append(path)
 
     # Step 3：符号归属（冻结模块 > 精确文件 > 唯一 basename > 按路径兜底建模块）
     frozen_files: set[str] = set()
@@ -462,6 +479,9 @@ def discover_modules(index: ProjectIndex) -> list[dict[str, Any]]:
         elif mod.get("scope_type") == "third_party":
             basis.append(f"scope_config:{mod['name']}")
             conf = 0.9
+        elif mod.get("scope_type") == "non_build":
+            basis.append("build_scope:non_build")
+            conf = 0.7
         elif mod["files"]:
             basis.append(f"path:{_leaf_dir(mod['files'][0]) or _stem(mod['files'][0])}")
         prefix = _strong_prefix(mod["symbols"])

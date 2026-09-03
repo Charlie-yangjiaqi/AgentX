@@ -70,8 +70,14 @@ def _norm_extra(paths: list[str] | None) -> list[str]:
 
 
 def build_scope_yaml(chosen: dict[str, Any]) -> str:
-    """生成 .agentxscope.yaml 内容（与 parse_scope_config 兼容）。"""
-    lines = ["# AgentX Scope（Phase 7.8 三层：project / third_party / ignore）"]
+    """生成 .agentxscope.yaml 内容（与 parse_scope_config 兼容）。
+
+    chosen 可含 "build_target"（Phase 7.10：用户确认的 Keil Active Target）。
+    """
+    lines = [
+        "# AgentX Scope（Phase 7.8 三层：project / third_party / ignore；"
+        "Phase 7.10 Build Scope: build.target）"
+    ]
     third_party = chosen.get("third_party") or []
     ignore = chosen.get("ignore") or []
     if third_party:
@@ -83,6 +89,10 @@ def build_scope_yaml(chosen: dict[str, Any]) -> str:
         lines.append("ignore:")
         for s in ignore:
             lines.append(f"  - {s['path']}/**")
+    bt = chosen.get("build_target")
+    if bt:
+        lines.append("build:")
+        lines.append(f"  target: {bt}")
     return "\n".join(lines) + "\n"
 
 

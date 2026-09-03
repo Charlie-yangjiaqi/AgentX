@@ -18,9 +18,41 @@ from agentx.scope.wizard import build_scope_yaml, scope_config_exists, write_sco
 
 GATE_STATUS = "scope_required"
 GATE_REASON = "first_project_index_without_scope"
+BUILD_TARGET_STATUS = "build_target_required"
 
 # 会建立/重建 Index 的 MCP action（query/build_status 纯读，不 gate）
 GATED_ACTIONS = frozenset({"plan", "auto", "sync", "understand", "status"})
+
+
+def check_build_target_init(project_root: Path) -> dict[str, Any] | None:
+    """Build Target 门禁（Phase 7.10）：多 Target 且未确认 → build_target_required。
+
+    规则：
+    - 无 Keil 工程 / 单 Target → None（自动，不打扰）
+    - 已配置 build.target（scope config）→ None
+    - 多 Target 且未配置 → Gate：
+        {status: build_target_required, reason, message,
+         build_targets: ["LVGL","Debug","Demo"], detail:{...}}
+    不自动猜 Target（用户必须确认分析哪个固件）。
+    """
+    from agentx.scope.build_scope import resolve_keil_build
+    from agentx.scope.config import load_scope_config
+
+    root = project_root.resolve()
+    view = resolve_keil_build(root)
+    if view.project_file is None or not view.ambiguity:
+        return None  # 无 Keil 工程或单 Target：无需确认
+    cfg = load_scope_config(root)
+    if cfg.get("build_target"):
+        return None  # 已配置 target
+    return {
+        "status": BUILD_TARGET_STATUS,
+        "reason": "keil_multi_target_unselected",
+        "message": "Keil 工程含多个 Target，需确认当前分析目标固件",
+        "build_targets": view.targets,
+        "build_files": len(view.build_files),
+        "project_file": str(view.project_file),
+    }
 
 
 def check_scope_init(project_root: Path) -> dict[str, Any] | None:
@@ -55,32 +87,40 @@ def check_scope_init(project_root: Path) -> dict[str, Any] | None:
     }
 
 
-def apply_scope_selections(project_root: Path, selections: dict[str, Any] | None) -> Path:
+def apply_scope_selections(
+    project_root: Path, selections: dict[str, Any] | None
+) -> Path:
     """确认后应用选择，生成 .agentxscope.yaml（返回文件路径）。
 
     selections = {"ignore": ["docs/**"|"docs", ...],
-                  "third_party": ["Middlewares/LVGL" | {"path","name"}, ...]}
+                  "third_party": ["Middlewares/LVGL" | {"path","name"}, ...],
+                  "build_target": "LVGL"}   # 可选：Phase 7.10 Keil Target
     显式确认（含空 selections）→ 写入（锁定"已初始化"，之后不再打扰）。
     MCP 无 stdin，确认语义 = 显式携带 scope_selections 再次调用。
     """
     chosen_third: list[dict[str, str]] = []
     chosen_ignore: list[dict[str, str]] = []
+    build_target: str | None = None
     if selections:
+        from agentx.scope.config import normalize_scope_path
+
         for raw in selections.get("ignore") or []:
-            p = str(raw).strip().replace("\\", "/").strip("/")
-            if p.endswith("/**"):
-                p = p[: -len("/**")]
+            p = normalize_scope_path(str(raw))
             if p:
                 chosen_ignore.append({"path": p, "reason": "手动添加"})
         for raw in selections.get("third_party") or []:
             if isinstance(raw, dict):
-                path = str(raw.get("path", "")).strip("/")
+                path = normalize_scope_path(str(raw.get("path", "")))
                 name = str(raw.get("name") or "").strip() or path.rsplit("/", 1)[-1]
             else:
-                path = str(raw).strip().replace("\\", "/").strip("/")
+                path = normalize_scope_path(str(raw))
                 name = path.rsplit("/", 1)[-1]
             if path:
                 chosen_third.append({"path": path, "name": name, "reason": "手动添加"})
-    return write_scope_config(
-        project_root, build_scope_yaml({"third_party": chosen_third, "ignore": chosen_ignore})
-    )
+        bt = selections.get("build_target")
+        if bt:
+            build_target = str(bt).strip()
+    payload: dict[str, Any] = {"third_party": chosen_third, "ignore": chosen_ignore}
+    if build_target:
+        payload["build_target"] = build_target
+    return write_scope_config(project_root, build_scope_yaml(payload))

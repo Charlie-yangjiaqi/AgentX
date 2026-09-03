@@ -4,13 +4,25 @@
 - resolver：文件 → (scope_type, scope_name) 分类
 - detector：agentx init 自动发现建议
 - ignore：旧 .agentxignore 兼容（单层 ignore）
+- build_scope（Phase 7.10）：Build Reality > Scope 目录规则 > 文件发现；
+  以 Keil Active Target source list 为主 Index 工程边界，未参与编译的
+  自有代码标记 non_build，不默认进主 project。
 """
 
 from __future__ import annotations
 
+from agentx.scope.build_scope import (
+    KeilBuildView,
+    build_boundary_files,
+    build_scope_summary,
+    classify_build_scope,
+    find_keil_project,
+    resolve_keil_build,
+)
 from agentx.scope.config import (
     SCOPE_CONFIG_FILENAME,
     SCOPE_IGNORED,
+    SCOPE_NON_BUILD,
     SCOPE_PROJECT,
     SCOPE_THIRD_PARTY,
     load_scope_config,
@@ -29,6 +41,7 @@ __all__ = [
     "SCOPE_IGNORED",
     "SCOPE_PROJECT",
     "SCOPE_THIRD_PARTY",
+    "SCOPE_NON_BUILD",
     "SCOPE_CONFIG_FILENAME",
     "LEGACY_IGNORE_FILENAME",
     "load_scope_config",
@@ -40,4 +53,10 @@ __all__ = [
     "is_ignored",
     "load_ignore_patterns",
     "scope_filter",
+    "KeilBuildView",
+    "find_keil_project",
+    "resolve_keil_build",
+    "build_boundary_files",
+    "classify_build_scope",
+    "build_scope_summary",
 ]

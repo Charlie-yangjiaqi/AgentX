@@ -543,15 +543,19 @@ def _detect_build_info(root: Path) -> dict[str, Any]:
         return info
 
     # 4. Keil（.uvprojx / .uvproj，XML）——解析唯一真相源：build/keil_parser
-    keil = _first_existing(root, _KEIL_EXTS)
+    from agentx.scope.build_scope import find_keil_project
+
+    keil = find_keil_project(root)
     if keil is not None:
         from agentx.build import parse_keil_project
 
-        project = parse_keil_project(keil)
+        # Phase 7.10：传 project_root，FilePath 归一化为工程相对路径（Build Scope 依据）
+        project = parse_keil_project(keil, project_root=root)
         info["system"] = "keil"
         info["build_source"] = "keil"
         info["has_build_config"] = True
         info["project_file"] = str(keil)
+        info["targets"] = [t.name for t in project.targets]
         if project.active_target is not None:
             info["target"] = project.target_name or None
             info["cpu"] = project.target_cpu

@@ -297,6 +297,14 @@ async def _action_status(
         "index_reason": reason,
         "plan": plan.model_dump() if plan else None,
     }
+    # Phase 7.10：Build Scope 边界摘要（target/project/non_build/third_party）
+    from agentx.index.index import load_index
+
+    idx = load_index(app.project_root)
+    if idx is not None:
+        bs = (idx.build_info or {}).get("build_scope") or {}
+        if bs:
+            out["build_scope"] = bs
     if sync_result is not None:
         out["sync"] = sync_result
     return out
