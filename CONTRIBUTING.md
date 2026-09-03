@@ -1,5 +1,7 @@
 # Contributing to AgentX
 
+English · [简体中文](CONTRIBUTING.zh-CN.md)
+
 Thanks for your interest! AgentX is a young project with a strong internal
 design culture (evidence over claims), so please read this before opening a
 PR. Issues and discussions in Chinese or English are both welcome.

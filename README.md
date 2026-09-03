@@ -13,6 +13,10 @@ plan / review / verify with a persistent project index.
 
 English · [简体中文](README.zh-CN.md)
 
+Docs: [Contributing](CONTRIBUTING.md) · [Contributing (中文)](CONTRIBUTING.zh-CN.md) ·
+[Changelog](CHANGELOG.md) · [Changelog (中文)](CHANGELOG.zh-CN.md) ·
+[License](LICENSE)
+
 ---
 
 ## What AgentX does

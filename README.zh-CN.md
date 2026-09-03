@@ -12,6 +12,10 @@ plan / review / verify。
 
 [English](README.md) · 简体中文
 
+文档：[参与贡献](CONTRIBUTING.zh-CN.md) · [Contributing](CONTRIBUTING.md) ·
+[变更日志](CHANGELOG.zh-CN.md) · [Changelog](CHANGELOG.md) ·
+[许可证](LICENSE)
+
 ---
 
 ## AgentX 是什么

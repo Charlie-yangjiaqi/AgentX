@@ -1,15 +1,15 @@
-# Changelog
+# Changelog（变更日志）
 
-English · [简体中文](CHANGELOG.zh-CN.md)
+[English](CHANGELOG.md) · 简体中文
 
-本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
-版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
+本文件遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
+版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
 AgentX 的架构按阶段演进（Phase 1 → 8）。每个 Phase 解决一个
 "AI 直接操作代码"的失效模式，最终收敛为
 **工程认知系统 + 安全决策系统 + 可验证修改系统**。
 
-## [Unreleased]
+## [Unreleased]（未发布）
 
 ### Phase 8 — Build Scope / 编译边界认知层
 
