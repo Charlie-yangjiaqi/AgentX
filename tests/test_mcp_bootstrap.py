@@ -261,7 +261,12 @@ async def test_job_completes_without_false_failure(
 async def test_job_scope_required_then_resume(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """后台任务遇 scope gate → scope_required 挂起；带确认续跑 → completed。"""
+    """后台任务遇 scope gate → scope_required 挂起；带确认续跑 → completed。
+
+    首次调用的返回可能是 running（同步窗口内未完成）或 scope_required
+    （任务极快命中 gate）——两者都是合法的 job 化结果，取决于调度时序。
+    测试不依赖窗口竞速：直接 await 后台任务收敛到 scope_required 再续跑。
+    """
     from agentx.mcp.jobs import job_manager
 
     root = _make_project(tmp_path)  # 含 Middlewares → scope 建议
@@ -270,9 +275,10 @@ async def test_job_scope_required_then_resume(
     monkeypatch.setattr(mcp_server, "_SYNC_WINDOW_SECONDS", 0.01)
 
     out = await mcp_server.agentx(str(root), "同步", action="sync")
-    assert out["status"] == "running"
+    assert out["status"] in ("running", "scope_required")
     job_id = out["job_id"]
 
+    # 等待后台任务命中 scope gate（无论首次返回是否已完成都收敛到此状态）
     job = job_manager().get(job_id)
     assert job is not None and job.task is not None
     await asyncio.wait_for(job.task, timeout=30)
@@ -283,7 +289,7 @@ async def test_job_scope_required_then_resume(
     resumed = await mcp_server.agentx(
         str(root), "同步", action="sync", job_id=job_id, scope_selections=selections
     )
-    assert resumed["status"] == "running"
+    assert resumed["status"] in ("running", "completed")
     job2 = job_manager().get(job_id)
     assert job2 is not None and job2.task is not None
     await asyncio.wait_for(job2.task, timeout=30)
