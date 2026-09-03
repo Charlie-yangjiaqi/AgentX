@@ -87,20 +87,13 @@ def check_scope_init(project_root: Path) -> dict[str, Any] | None:
     }
 
 
-def apply_scope_selections(
-    project_root: Path, selections: dict[str, Any] | None
-) -> Path:
-    """确认后应用选择，生成 .agentxscope.yaml（返回文件路径）。
+def _selections_payload(selections: dict[str, Any] | None) -> dict[str, Any]:
+    """把 scope_selections 转成 build_scope_yaml 的 chosen 结构（含归一化）。
 
-    selections = {"ignore": ["docs/**"|"docs", ...],
-                  "third_party": ["Middlewares/LVGL" | {"path","name"}, ...],
-                  "build_target": "LVGL"}   # 可选：Phase 7.10 Keil Target
-    显式确认（含空 selections）→ 写入（锁定"已初始化"，之后不再打扰）。
-    MCP 无 stdin，确认语义 = 显式携带 scope_selections 再次调用。
+    selections 传 None 视为空（显式确认：写空配置锁定初始化）。
     """
     chosen_third: list[dict[str, str]] = []
     chosen_ignore: list[dict[str, str]] = []
-    build_target: str | None = None
     if selections:
         from agentx.scope.config import normalize_scope_path
 
@@ -117,10 +110,62 @@ def apply_scope_selections(
                 name = path.rsplit("/", 1)[-1]
             if path:
                 chosen_third.append({"path": path, "name": name, "reason": "手动添加"})
-        bt = selections.get("build_target")
-        if bt:
-            build_target = str(bt).strip()
     payload: dict[str, Any] = {"third_party": chosen_third, "ignore": chosen_ignore}
-    if build_target:
-        payload["build_target"] = build_target
-    return write_scope_config(project_root, build_scope_yaml(payload))
+    if selections and selections.get("build_target"):
+        payload["build_target"] = str(selections["build_target"]).strip()
+    return payload
+
+
+def apply_scope_selections(
+    project_root: Path, selections: dict[str, Any] | None
+) -> Path:
+    """确认后应用选择，生成 .agentxscope.yaml（返回文件路径）。
+
+    selections = {"ignore": ["docs/**"|"docs", ...],
+                  "third_party": ["Middlewares/LVGL" | {"path","name"}, ...],
+                  "build_target": "LVGL"}   # 可选：Phase 7.10 Keil Target
+    显式确认（含空 selections）→ 写入（锁定"已初始化"，之后不再打扰）。
+    MCP 无 stdin，确认语义 = 显式携带 scope_selections 再次调用。
+    """
+    return write_scope_config(project_root, build_scope_yaml(_selections_payload(selections)))
+
+
+def preview_scope_change(project_root: Path, selections: dict[str, Any]) -> dict[str, Any]:
+    """Scope 修改影响预览（Phase 8.1，不落盘）：新旧 scope 对源文件分类差异统计。
+
+    返回 {before:{project,third_party,non_build,ignored}, after:{...},
+          moves:[{file, from, to}]（前 50 条）, moved_count}
+    用磁盘相关源文件清单做差异，不依赖 Index（Index 可能还没反映新 scope）。
+    """
+    from agentx.index.fingerprint import relevant_files
+    from agentx.scope.config import parse_scope_config, scope_of_file
+    from agentx.scope.resolver import ScopeResolver
+    from agentx.scope.wizard import build_scope_yaml
+
+    root = project_root.resolve()
+    old_cfg = ScopeResolver(root).config
+    payload_text = build_scope_yaml(_selections_payload(selections))
+    new_cfg = parse_scope_config(payload_text)
+
+    def _counts(cfg: dict[str, Any], files: list[str]) -> dict[str, int]:
+        c: dict[str, int] = {"project": 0, "third_party": 0, "non_build": 0, "ignored": 0}
+        for f in files:
+            st, _ = scope_of_file(f, cfg)
+            c[st] = c.get(st, 0) + 1
+        return c
+
+    files = relevant_files(root)
+    before = _counts(old_cfg, files)
+    after = _counts(new_cfg, files)
+    moves: list[dict[str, Any]] = []
+    for f in files:
+        b, _ = scope_of_file(f, old_cfg)
+        a, _ = scope_of_file(f, new_cfg)
+        if b != a:
+            moves.append({"file": f, "from": b, "to": a})
+    return {
+        "before": before,
+        "after": after,
+        "moved_count": len(moves),
+        "moves": moves[:50],
+    }

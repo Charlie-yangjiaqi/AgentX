@@ -1,6 +1,6 @@
 [project]
 name = "agentx"
-version = "0.1.0"
+version = "0.1.1"
 description = "Evidence-based multi-agent engineering engine for embedded firmware: plan / review / verify with a persistent project index."
 readme = "README.md"
 authors = [

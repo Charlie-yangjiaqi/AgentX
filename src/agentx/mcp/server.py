@@ -174,6 +174,8 @@ def _wrap(
         "runtime": runtime,
         "events": events.events(),
     }
+    # Phase 8.1：权限元数据注入（顶层 operation_class/changes_code/requires_decision_gate）
+    out = _decorate(workflow, out)
     # 业务错误（如缺 Plan）同时暴露在顶层，兼容旧客户端
     if isinstance(result, dict) and result.get("error"):
         out["error"] = result["error"]
@@ -275,6 +277,90 @@ async def _action_sync(
     from agentx.index.sync import sync_index
 
     return sync_index(app.project_root, origin=origin, scope_selections=scope_selections)
+
+
+async def _action_scope_update(
+    app: Application,
+    task: str,
+    origin: str = "unknown",
+    force_rebuild: bool = False,
+    events: EventCollector | None = None,
+    scope_selections: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Phase 8.1 INDEX_WRITE：修改 .agentxscope.yaml（ignore/third_party/build_target）。
+
+    全量替换语义：scope_selections 提供完整期望值（ignore/third_party/build_target）。
+    只写 AgentX 自身配置文件，绝不触碰用户源码 → 不触发 CODE_WRITE 审批。
+    """
+    from agentx.scope.config import SCOPE_CONFIG_FILENAME, compute_scope_fingerprint
+    from agentx.scope.initializer import apply_scope_selections, preview_scope_change
+
+    root = app.project_root
+    selections = scope_selections or {}
+    preview = preview_scope_change(root, selections)
+    target = apply_scope_selections(root, selections)
+    return {
+        "status": "updated",
+        "scope_changed": True,
+        "scope_config": str(target),
+        "scope_fingerprint": compute_scope_fingerprint(root),
+        "config_file": SCOPE_CONFIG_FILENAME,
+        "preview": preview,
+        "next": "调用 action=reindex 使新 scope 生效（Index 尚未重建）",
+    }
+
+
+async def _action_reindex(
+    app: Application,
+    task: str,
+    origin: str = "unknown",
+    force_rebuild: bool = False,
+    events: EventCollector | None = None,
+    scope_selections: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Phase 8.1 INDEX_WRITE：强制重建 Index（invalidate → CodeGraph → enrich → module）。
+
+    使用磁盘上最新的 scope 配置（scope_fingerprint 比较，杜绝旧 scope 缓存）。
+    只重建 AgentX 自身认知产物，不修改用户源码 → 不触发 CODE_WRITE 审批。
+    """
+    from agentx.index.sync import sync_index
+
+    # sync_index 内部：scope_fingerprint 变化 → scope_rebuild；否则全量 enrich。
+    # 传 scope_selections（scope_update 刚写入过时可不传，读取最新磁盘配置）。
+    result = sync_index(
+        root := app.project_root,
+        origin=origin or "agentx_index_write",
+        scope_selections=scope_selections,
+    )
+    from agentx.index.index import index_status, load_index
+
+    status, reason = index_status(root)
+    idx = load_index(root)
+    from agentx.scope.config import compute_scope_fingerprint
+
+    out: dict[str, Any] = {
+        **result,
+        "status": "completed",
+        "index_status": status.value,
+        "index_reason": reason,
+        "fingerprint": idx.project_fingerprint if idx else None,
+        "scope_fingerprint": idx.scope_fingerprint if idx else compute_scope_fingerprint(root),
+    }
+    # scope_summary：project/third_party/non_build/ignored
+    if idx is not None:
+        from collections import Counter
+
+        counts = Counter(f.scope_type for f in idx.files)
+        out["scope_summary"] = {
+            "project": counts.get("project", 0),
+            "third_party": counts.get("third_party", 0),
+            "non_build": counts.get("non_build", 0),
+            "ignored": counts.get("ignored", 0),
+        }
+        bs = (idx.build_info or {}).get("build_scope") or {}
+        if bs:
+            out["build_scope"] = bs
+    return out
 
 
 async def _action_status(
@@ -459,15 +545,56 @@ _ACTIONS: dict[str, _ActionFn] = {
     "verify": _action_verify,
     "understand": _action_understand,
     "sync": _action_sync,
+    "scope_update": _action_scope_update,
+    "reindex": _action_reindex,
     "status": _action_status,
     "query": _action_query,
     "search_feature": _action_search_feature,
     "build_status": _action_build_status,
 }
 
+# Phase 8.1 权限模型：每个 action 的写权限分类（宿主 AI 据此决定是否需要代码审批）。
+# READ / INDEX_WRITE（低风险、可逆，宿主可直接执行）/ CODE_WRITE_PREVIEW（规划）/
+# CODE_WRITE（自动闭环：修改源码）。
+OPERATION_METADATA: dict[str, dict[str, Any]] = {
+    "query": {"class": "READ", "changes_code": False, "requires_decision_gate": False},
+    "search_feature": {"class": "READ", "changes_code": False, "requires_decision_gate": False},
+    "build_status": {"class": "READ", "changes_code": False, "requires_decision_gate": False},
+    "status": {"class": "READ", "changes_code": False, "requires_decision_gate": False},
+    "understand": {"class": "INDEX_WRITE", "changes_code": False, "requires_decision_gate": False},
+    "sync": {"class": "INDEX_WRITE", "changes_code": False, "requires_decision_gate": False},
+    "scope_update": {
+        "class": "INDEX_WRITE",
+        "changes_code": False,
+        "requires_decision_gate": False,
+    },
+    "reindex": {"class": "INDEX_WRITE", "changes_code": False, "requires_decision_gate": False},
+    "review": {"class": "READ", "changes_code": False, "requires_decision_gate": False},
+    "verify": {"class": "READ", "changes_code": False, "requires_decision_gate": False},
+    "plan": {"class": "CODE_WRITE_PREVIEW", "changes_code": True, "requires_decision_gate": True},
+    "auto": {"class": "CODE_WRITE", "changes_code": True, "requires_decision_gate": True},
+}
+
+
+def operation_metadata(action: str) -> dict[str, Any]:
+    """action → 权限元数据（未知 action 保守按 code_write 处理）。"""
+    return OPERATION_METADATA.get(action, {"class": "CODE_WRITE", "changes_code": True,
+                                           "requires_decision_gate": True})
+
+
+def _decorate(action: str, out: dict[str, Any]) -> dict[str, Any]:
+    """把权限元数据注入返回结果（顶层），宿主 AI 无需猜权限。"""
+    meta = dict(operation_metadata(action))
+    meta["action"] = action
+    out["operation_class"] = meta["class"]
+    out["changes_code"] = meta["changes_code"]
+    out["requires_decision_gate"] = meta["requires_decision_gate"]
+    return out
+
 # build 类 action：Index=MISSING 且项目规模 ≥ 阈值时后台化
 # （避免大项目长任务卡 300s RPC；小项目走同步路径保留 progress 流）
-_BUILD_ACTIONS = {"auto", "plan", "sync", "understand"}
+# Phase 8.1：reindex 是大项目最重操作，同样后台化；scope_update 只写配置，保持同步。
+_BUILD_ACTIONS = {"auto", "plan", "sync", "understand", "reindex"}
 _JOB_SOURCE_THRESHOLD = 200  # 源文件数 ≥ 此值 → 后台任务
 # 短同步窗口：后台任务在此时间内完成 → 同步返回结果（测试/小项目体验不变）
 _SYNC_WINDOW_SECONDS = 5.0
@@ -594,8 +721,16 @@ def _job_status_view(job: Any) -> dict[str, Any]:
         "review（Index+Plan+Diff 审查）/ "
         "verify（机器验证）/ "
         "understand（主动刷新工程理解）/ "
-        "sync（Index 同步）/ "
+        "sync（Index 同步，scope 变化自动强制重建）/ "
+        "scope_update（Phase 8.1 INDEX_WRITE：改 .agentxscope.yaml 的 ignore/"
+        "third_party/build_target，写 AgentX 自身配置，不需代码审批）/ "
+        "reindex（Phase 8.1 INDEX_WRITE：强制重建 Index，使用最新 scope，"
+        "不需代码审批）/ "
         "status（Index 状态与项目认知概览）。"
+        "【权限边界】每次返回顶层带 operation_class（READ/INDEX_WRITE/"
+        "CODE_WRITE_PREVIEW/CODE_WRITE）+ changes_code + requires_decision_gate。"
+        "修改用户源码请用 plan/auto（走 Decision Gate）；维护索引用 "
+        "scope_update→reindex 或 sync/understand（无需代码审批）。"
         "AgentX 自动维护 Index：VALID 复用、STALE 同步、仅缺失/损坏/force_rebuild 重建。"
         "【Scope 首次初始化协议】首次使用（项目根目录无 .agentxscope.yaml 且检测到 "
         "ignore/third_party 建议）时，plan/auto/sync/understand 会返回 "
@@ -631,7 +766,7 @@ async def agentx(
         mgr = job_manager()
         job = mgr.get(job_id)
         if job is None:
-            return {"error": f"未知 job_id: {job_id}"}
+            return _decorate(action, {"error": f"未知 job_id: {job_id}"})
         if scope_selections is not None and job.status in ("scope_required", "failed"):
             # 挂起任务续跑：原始参数 + scope 确认
             runner = _make_job_runner(
@@ -646,16 +781,19 @@ async def agentx(
             )
             resumed = mgr.resume(job_id, runner, scope_selections)
             if resumed is None:
-                return {"error": f"job {job_id} 状态不可续跑（{job.status}）"}
-            return _job_status_view(resumed)
+                return _decorate(
+                    action, {"error": f"job {job_id} 状态不可续跑（{job.status}）"}
+                )
+            return _decorate(action, _job_status_view(resumed))
         if action == "status":
-            return {"job": _job_status_view(job)}
-        return {
-            "error": f"job {job_id} 正在运行（{job.status}），使用 action=status 查询",
-        }
+            return _decorate(action, {"job": _job_status_view(job)})
+        return _decorate(
+            action,
+            {"error": f"job {job_id} 正在运行（{job.status}），使用 action=status 查询"},
+        )
     # Phase 7.8：decision_action 控制（用户取消 / 仅查看影响链）
     if action in ("plan", "auto") and decision_action == "cancel":
-        return {"status": "cancelled", "message": "已取消修改规划（用户决定）"}
+        return _decorate(action, {"status": "cancelled", "message": "已取消修改规划（用户决定）"})
     # 长任务后台化：build 类 action + Index=MISSING + 项目规模 ≥ 阈值 →
     # 后台任务 + 短同步窗口（5s 内完成同步返回；否则返回 running + job_id）
     from agentx.index.index import IndexStatus, index_status
@@ -692,19 +830,25 @@ async def agentx(
             if job.status == "completed" and job.result is not None:
                 return sanitize_value(job.result)  # 短窗口内完成：同步返回
             if job.status == "scope_required":
-                return _job_status_view(job)  # 挂起等 Scope 确认（不假失败）
-            return {
-                "status": "running",
-                "job_id": job.id,
-                "phase": "building_index",
-                "message": "Index 构建中（后台任务），使用 action=status + job_id 查询进度",
-            }
+                return _decorate(action, _job_status_view(job))  # 挂起等 Scope 确认（不假失败）
+            return _decorate(
+                action,
+                {
+                    "status": "running",
+                    "job_id": job.id,
+                    "phase": "building_index",
+                    "message": "Index 构建中（后台任务），使用 action=status + job_id 查询进度",
+                },
+            )
     handler = _ACTIONS.get(action)
     if handler is None:
-        return sanitize_value(
-            {
-                "error": f"未知 action: {action}（支持: {', '.join(_ACTIONS)}）",
-            }
+        return _decorate(
+            action,
+            sanitize_value(
+                {
+                    "error": f"未知 action: {action}（支持: {', '.join(_ACTIONS)}）",
+                }
+            ),
         )
     app = _app(project_path)
     events = EventCollector()
@@ -776,13 +920,18 @@ async def agentx(
         from agentx.providers.openai import LLMRequestError
 
         if isinstance(e, LLMRequestError):
-            return sanitize_value(
-                {
-                    "error": f"{action} 失败: [{e.category}] {e.detail}",
-                    "llm_error": e.to_dict(),
-                }
+            return _decorate(
+                action,
+                sanitize_value(
+                    {
+                        "error": f"{action} 失败: [{e.category}] {e.detail}",
+                        "llm_error": e.to_dict(),
+                    }
+                ),
             )
-        return sanitize_value({"error": f"{action} 失败: {type(e).__name__}: {e}"})
+        return _decorate(
+            action, sanitize_value({"error": f"{action} 失败: {type(e).__name__}: {e}"})
+        )
     finally:
         if heartbeat is not None:
             heartbeat.stop()
@@ -790,6 +939,23 @@ async def agentx(
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
         app.store.close()
+
+
+@server.tool(
+    name="agentx.capabilities",
+    description=(
+        "AgentX 权限边界（Phase 8.1）。返回每个 action 的 operation_class："
+        "READ（直接允许）/ INDEX_WRITE（修改 AgentX 自身索引/scope 配置，宿主可直接执行，"
+        "不需代码审批）/ CODE_WRITE_PREVIEW（plan：规划修改用户代码，需 Decision Gate）/ "
+        "CODE_WRITE（auto：修改用户源码，需人工决策）。宿主 AI 据此决定是否走审批，无需猜测。"
+    ),
+)
+async def agentx_capabilities() -> dict[str, Any]:
+    return {
+        "operations": {
+            action: dict(operation_metadata(action)) for action in sorted(_ACTIONS)
+        }
+    }
 
 
 async def main_async() -> None:
