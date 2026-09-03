@@ -1,5 +1,9 @@
 # AgentX
 
+[![CI](https://github.com/Charlie-yangjiaqi/AgentX/actions/workflows/ci.yml/badge.svg)](https://github.com/Charlie-yangjiaqi/AgentX/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.13-blue.svg)](https://www.python.org/downloads/)
+
 **面向嵌入式固件的、基于证据的多智能体工程引擎** —— 通过长期项目索引完成
 plan / review / verify。
 

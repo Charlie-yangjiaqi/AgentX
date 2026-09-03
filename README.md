@@ -1,5 +1,9 @@
 # AgentX
 
+[![CI](https://github.com/Charlie-yangjiaqi/AgentX/actions/workflows/ci.yml/badge.svg)](https://github.com/Charlie-yangjiaqi/AgentX/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.13-blue.svg)](https://www.python.org/downloads/)
+
 **Evidence-based multi-agent engineering engine for embedded firmware** —
 plan / review / verify with a persistent project index.
 
