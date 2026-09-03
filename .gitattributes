@@ -1,0 +1,7 @@
+# 统一行尾策略：仓库内一律 LF，消除跨平台 diff 噪音
+# （Windows 协作者 checkout 时也得到 LF，现代编辑器均兼容）
+* text=auto eol=lf
+
+# Windows 专属脚本保留 CRLF（如有需要）
+*.bat text eol=crlf
+*.cmd text eol=crlf

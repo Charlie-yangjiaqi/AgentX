@@ -1,0 +1,53 @@
+[project]
+name = "agentx"
+version = "0.1.0"
+description = "Evidence-based multi-agent engineering engine for embedded firmware: plan / review / verify with a persistent project index."
+readme = "README.md"
+authors = [
+    { name = "Charlie", email = "Charlie-yangjiaqi@users.noreply.github.com" }
+]
+license = "MIT"
+requires-python = ">=3.13"
+dependencies = [
+    "httpx>=0.28.1",
+    "mcp>=2.1.1",
+    "pydantic>=2.13.4",
+    "textual>=8.2.8",
+    "tree-sitter>=0.25.2,<0.26",  # 0.26.0 Python binding 有 native 内存 bug（累积堆损坏），锁定 0.25.x
+    "tree-sitter-c>=0.24.2",
+    "typer>=0.27.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.8,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.3.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.5",
+]
+
+[project.scripts]
+agentx = "agentx.cli.app:main"
+agentx-mcp = "agentx.mcp.server:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "ASYNC"]
+ignore = ["SIM117", "B008"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+packages = ["agentx"]
