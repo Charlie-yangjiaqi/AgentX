@@ -14,7 +14,7 @@ plan / review / verify。
 
 文档：[参与贡献](CONTRIBUTING.zh-CN.md) · [Contributing](CONTRIBUTING.md) ·
 [变更日志](CHANGELOG.zh-CN.md) · [Changelog](CHANGELOG.md) ·
-[许可证](LICENSE)
+[许可证](LICENSE) · [许可证中文参考](LICENSE.zh-CN.md)
 
 ---
 
