@@ -27,7 +27,9 @@ def file_in_build(project: KeilProject, file_path: str) -> str:
         return STATUS_UNKNOWN
     needle = _norm(file_path)
     for f in project.active_target.compiled_files:
-        if _norm(f.path) == needle or _norm(f.path).endswith("/" + needle) or _norm(f.path) == _norm(file_path.rsplit("/", 1)[-1]):
+        norm = _norm(f.path)
+        base = _norm(file_path.rsplit("/", 1)[-1])
+        if norm in (needle, base) or norm.endswith("/" + needle):
             return STATUS_COMPILED
     for f in project.active_target.excluded_files:
         if _norm(f.path) == needle or _norm(f.path).endswith("/" + needle):
@@ -68,7 +70,10 @@ def build_status(project: KeilProject) -> dict[str, Any]:
         "compiled_count": len(compiled),
         "excluded_count": len(excluded),
         "project_file": project.project_file,
-        "groups": [{"name": g.name, "files": [f.path for f in g.files]} for g in (project.active_target.groups or [])],
+        "groups": [
+            {"name": g.name, "files": [f.path for f in g.files]}
+            for g in (project.active_target.groups or [])
+        ],
     }
     if project.target_cpu:
         out["cpu"] = project.target_cpu
@@ -119,14 +124,14 @@ def build_query_from_info(build_info: dict[str, Any], target_path: str) -> dict[
             "compiled": False,
             "excluded": False,
         }
-    in_compiled = needle in compiled or base in compiled or any(needle in c or c.endswith("/" + needle) for c in compiled)
-    in_excluded = needle in excluded or base in excluded or any(needle in x or x.endswith("/" + needle) for x in excluded)
+    in_compiled = _in_set(needle, base, compiled)
+    in_excluded = _in_set(needle, base, excluded)
     result: dict[str, Any] = {
         "file": target_path,
         "exists": in_compiled or in_excluded,
         "compiled": in_compiled and not in_excluded,
         "excluded": in_excluded and not in_compiled,
-        "status": STATUS_COMPILED if (in_compiled and not in_excluded) else (STATUS_EXCLUDED if in_excluded else STATUS_NOT_IN_PROJECT),
+        "status": _status_of(in_compiled, in_excluded),
         "target": str(build_info.get("target") or ""),
     }
     if build_info.get("cpu"):
@@ -134,3 +139,19 @@ def build_query_from_info(build_info: dict[str, Any], target_path: str) -> dict[
     if build_info.get("defines"):
         result["defines"] = list(build_info["defines"])
     return result
+
+
+def _in_set(needle: str, base: str, pool: set[str]) -> bool:
+    """路径命中判定：完全匹配、路径尾匹配或子串包含。"""
+    if needle in pool or base in pool:
+        return True
+    return any(needle in c or c.endswith("/" + needle) for c in pool)
+
+
+def _status_of(in_compiled: bool, in_excluded: bool) -> str:
+    """编译/排除状态优先级：compiled > excluded > not_in_project。"""
+    if in_compiled and not in_excluded:
+        return STATUS_COMPILED
+    if in_excluded:
+        return STATUS_EXCLUDED
+    return STATUS_NOT_IN_PROJECT
