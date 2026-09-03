@@ -25,6 +25,7 @@ from agentx.scope.config import (
     SCOPE_NON_BUILD,
     SCOPE_PROJECT,
     SCOPE_THIRD_PARTY,
+    compute_scope_fingerprint,
     load_scope_config,
     scope_of_file,
 )
@@ -46,6 +47,7 @@ __all__ = [
     "LEGACY_IGNORE_FILENAME",
     "load_scope_config",
     "scope_of_file",
+    "compute_scope_fingerprint",
     "ScopeResolver",
     "resolve_project_scope",
     "detect_third_party",

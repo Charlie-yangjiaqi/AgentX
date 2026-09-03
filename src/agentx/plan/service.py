@@ -452,6 +452,10 @@ def enrich_index(project_root: Path) -> tuple[ProjectIndex, ProjectGraph]:
         errors=graph.errors + semantic_errors,
     )
     index.capabilities = capabilities
+    # Phase 8.1：scope 是 Index 语义的一级依赖——记录本次生成用的 scope 指纹
+    from agentx.scope.config import compute_scope_fingerprint
+
+    index.scope_fingerprint = compute_scope_fingerprint(root)
     # Phase 7.7.3：函数注册/绑定事实（独立于 CodeGraph call_graph，不承诺调用）
     index.indirect_calls = indirect_calls
     # Phase 7.7.4：类型语义（数据模型级理解事实，独立于 symbols）

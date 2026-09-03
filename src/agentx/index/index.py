@@ -65,6 +65,9 @@ class ProjectIndex(AgentXModel):
     codegraph_source: str | None = None
     project_understanding: dict[str, Any] | None = None
     capabilities: dict[str, Any] = {}  # 能力状态（semantic/module enabled+reason），区别于 errors
+    # Phase 8.1：scope 是 Index 语义的一级依赖——记录生成时用的 scope 配置指纹，
+    # scope 变化必须强制 reclassify + enrich（不靠源码增删启发式）。
+    scope_fingerprint: str | None = None
     errors: list[str] = []
 
 

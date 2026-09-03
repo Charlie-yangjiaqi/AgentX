@@ -195,18 +195,64 @@ def load_scope_config(project_root: Path) -> dict[str, Any]:
     return parse_scope_config("")
 
 
-def _glob_match(rel_path: str, pattern: str) -> bool:
+def compute_scope_fingerprint(project_root: Path) -> str:
+    """Scope 配置指纹：hash(ignore + third_party + project_include + build_target)。
+
+    scope 是 Index 语义的一级依赖（Phase 8.1）。指纹变化 = 索引边界变化，
+    必须强制 reclassify + enrich；不能依赖"源码增删"启发式判断。
+    配置不存在 → 稳定空值指纹（确定性）。
+    """
+    import hashlib
+    import json
+
+    cfg = load_scope_config(project_root)
+    canonical = {
+        "ignore": sorted(cfg.get("ignore", [])),
+        "third_party": sorted(
+            f"{t.get('path', '')}|{t.get('name', '')}" for t in cfg.get("third_party", [])
+        ),
+        "project_include": sorted(cfg.get("project_include", [])),
+        "project_include_set": bool(cfg.get("project_include_set")),
+        "build_target": cfg.get("build_target"),
+    }
+    blob = json.dumps(canonical, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:8]
+
+
+def _ignore_match(rel_path: str, pattern: str) -> bool:
+    """ignore 模式匹配（gitignore 语义，Phase 8.1）：
+
+    - 目录 pattern（LT758_DEMO / LT758_DEMO/**）→ 前缀（含子目录）
+    - 无斜杠 glob（*.py、*.py/**）→ 匹配任意深度的 basename
+      （*.py 命中 User/tool.py；*.py/** 归一为 *.py 同样命中）
+    - 其余按 fnmatch
+    """
     p = rel_path.replace("\\", "/")
     pat = pattern.replace("\\", "/").strip("/")
     if not pat:
         return False
+    # 尾随 /** ：作用于其前缀（目录树或名称 glob）
+    if pat.endswith("/**"):
+        base = pat[: -len("/**")].rstrip("/")
+        if base and "/" not in base and "*" in base:
+            pat = base  # *.py/** → 名称 glob 任意深度
+        else:
+            return p.startswith(base + "/") or p == base
     if fnmatch.fnmatch(p, pat):
         return True
     if pat.endswith("/**"):
         return p.startswith(pat[: -len("/**")].rstrip("/") + "/")
     if "/" not in pat and "*" not in pat:
+        # 裸目录/文件名：精确或前缀（目录下所有内容）
         return p == pat or p.startswith(pat + "/")
-    return fnmatch.fnmatch(p, pat + "/*")
+    if "/" not in pat:
+        # 无斜杠 glob：命中任意深度的同名/同模式 basename（gitignore 语义）
+        return fnmatch.fnmatch(p.rsplit("/", 1)[-1], pat)
+    return bool(fnmatch.fnmatch(p, pat + "/*"))
+
+
+def _glob_match(rel_path: str, pattern: str) -> bool:
+    return _ignore_match(rel_path, pattern)
 
 
 def scope_of_file(rel_path: str, config: dict[str, Any]) -> tuple[str, str | None]:

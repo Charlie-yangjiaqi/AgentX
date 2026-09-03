@@ -16,7 +16,6 @@
 
 from __future__ import annotations
 
-import fnmatch
 from pathlib import Path
 
 SCOPE_FILENAME = ".agentxignore"
@@ -59,27 +58,12 @@ def is_ignored(rel_path: str, patterns: list[str]) -> bool:
     """相对路径（/ 分隔）是否命中任一 ignore pattern。
 
     - 目录 pattern（LT758_DEMO）匹配其下所有文件
-    - glob pattern（*.py、tools/**）按 fnmatch 匹配
+    - 无斜杠 glob（*.py）按任意深度 basename 匹配（gitignore 语义，Phase 8.1）
+    - 含斜杠 glob（tools/**）按 fnmatch/前缀匹配
     """
-    p = rel_path.replace("\\", "/")
-    for raw in patterns:
-        pat = raw.replace("\\", "/").strip("/")
-        if not pat:
-            continue
-        if fnmatch.fnmatch(p, pat):
-            return True
-        if pat.endswith("/**"):
-            if p.startswith(pat[: -len("/**")].rstrip("/") + "/"):
-                return True
-            continue
-        if "/" not in pat and "*" not in pat:
-            # 裸目录/文件名：精确或前缀（目录下所有内容）
-            if p == pat or p.startswith(pat + "/"):
-                return True
-            continue
-        if fnmatch.fnmatch(p, pat + "/*"):
-            return True
-    return False
+    from agentx.scope.config import _ignore_match  # noqa: PLC2701
+
+    return any(_ignore_match(rel_path, raw) for raw in patterns)
 
 
 def scope_filter(project_root: Path, rel_paths: list[str]) -> list[str]:

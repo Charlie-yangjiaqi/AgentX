@@ -287,6 +287,29 @@ def sync_index(
             "index_after": {"status": "VALID", "file_count": enriched.file_count},
         }
 
+    # Phase 8.1：scope 是 Index 语义的一级依赖。scope_fingerprint 变化 →
+    # 强制 reclassify + enrich（不能靠源码增删启发式判断，否则新增 third_party/
+    # ignore 仍留在盘上的文件会被误判 L0 incremental，Index 保留旧 scope）。
+    from agentx.scope.config import compute_scope_fingerprint
+
+    scope_changed = index.scope_fingerprint != compute_scope_fingerprint(root)
+    if scope_changed:
+        # 重新分类用最新 scope；build target/third_party 变化同样落进 scope fp
+        index, graph = enrich_index(root)
+        return {
+            "level": "L4",
+            "action": "scope_rebuild",
+            "changed_files": [],
+            "message": (
+                "Scope 配置变化，已强制重建（reclassify + enrich）"
+                f"（{graph.source}，{index.file_count} 文件，{len(index.symbols)} 符号）"
+            ),
+            "origin": origin,
+            "scope_changed": True,
+            "scope_fingerprint": index.scope_fingerprint,
+            "index_after": {"status": "VALID", "file_count": index.file_count},
+        }
+
     # 旧指纹 = Index 记录的（对应上一次认知状态）；新指纹 = 当前磁盘
     fingerprint_before = index.project_fingerprint
     if diff is not None:
