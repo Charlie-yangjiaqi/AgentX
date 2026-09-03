@@ -47,6 +47,10 @@ src = ["src", "tests"]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "ASYNC"]
 ignore = ["SIM117", "B008"]
 
+[tool.ruff.lint.isort]
+# 显式声明 first-party，消除命名空间子包带来的环境相关分类差异
+known-first-party = ["agentx"]
+
 [tool.mypy]
 python_version = "3.13"
 strict = true
