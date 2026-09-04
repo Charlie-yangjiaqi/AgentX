@@ -9,6 +9,48 @@ AgentX 的架构按阶段演进（Phase 1 → 8）。每个 Phase 解决一个
 "AI 直接操作代码"的失效模式，最终收敛为
 **工程认知系统 + 安全决策系统 + 可验证修改系统**。
 
+## [0.2.0] — 2026-09-04
+
+### Phase 8.2 — Index Freshness / 增量更新 / 重建决策模型
+
+让 AgentX 成为"会自己维护的工程知识库"，而不是"每次变化都全量重扫的工具"：
+
+- **三类可独立归因指纹**：`scope_fingerprint`（已有）/ `source_fingerprint`
+  （scope-agnostic 代码内容）/ `build_scope_fingerprint`（active target 编译边界）
+  随 enrich / reindex 落库；scope 配置变化不再伪装成源码变化。
+- **Freshness 状态机**：`VALID / STALE_RECOMMENDED / AUTO_UPDATED /
+  REINDEX_REQUIRED`；阈值（数量 / 比例 / 变化类型）联合判定并全部可配置
+  （`config.json#freshness` + `AGENTX_FRESHNESS_*` env）。
+- **真文件级增量**：改 1 个 `.c` → 只对该文件重跑 semantic/type，按
+  `(file,name,type)` diff-merge 符号；删除文件 → 其 file/symbol/type facts 全部
+  移除，无残留；call/include 取自 CodeGraph 引擎增量同步后的权威快照。
+- **安全升级网**：无法可靠局部修复（如公共 `.h` 大范围改动）→ 升级
+  `REINDEX_REQUIRED`，绝不静默用不完整增量污染 Index。
+- **重建决策模型**：`reindex` 是唯一完整重建入口；`sync`/`status`/`query` 自动
+  维护封顶 Level 2；CODE_WRITE 永不隐式触发 full reindex；plan/auto 遇
+  `REINDEX_REQUIRED` 硬停。
+- MCP 所有响应顶层带 `index_freshness`。
+
+### Phase 8.3 — Human Project Knowledge / Human Index
+
+在 Machine Index 之上新增工程师可读的知识表达层：
+
+- 新增 `src/agentx/human/`：`HumanKnowledgeService`（generate / refresh / status）、
+  `HumanKnowledgeBundle`（零 LLM 证据收集）、确定性文档渲染、`manifest.json`
+  （document → modules / knowledge_sources / knowledge_dependencies）。
+- 生成 `PROJECT_OVERVIEW.md` / `ARCHITECTURE.md` / `MODULES.md`，写入
+  `<project>_codebase_index/human/`（与 index.json 同目录，非项目根 docs）。
+- **增量刷新**：manifest `knowledge_dependencies` 决定哪些文档受影响
+  （改函数 → 只刷 MODULES/受影响文档；改架构关系 → 刷 ARCHITECTURE）。
+- **Fact / Inference / Unknown 分离**：confidence 由 scorer 决定，LLM 不参与；
+  non_build / third_party 明确标注"不在当前 build target"，绝不当当前固件描述。
+- **LLM 幻觉防护**：散文生成后经 allowlist 校验，引用 bundle 外的大写标识符即
+  丢弃（LLM 只做语言组织，不新增事实）。
+- project_understanding 缺失 → 自动补齐；补不出 → 文档标 Needs verification，
+  不阻塞。
+- MCP 新增 `human_index` action（task=generate|refresh|status），
+  `operation_class=INDEX_WRITE / changes_code=false / requires_decision_gate=false`。
+
 ## [0.1.1] — 2026-09-03
 
 ### Phase 8 — Build Scope / 编译边界认知层

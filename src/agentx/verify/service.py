@@ -67,13 +67,25 @@ class VerifyService:
                 "index_status": status,
             }
         if status == IndexStatus.STALE:
-            # 任务前置检查：禁止用旧 Index 验证 → 先 Index Sync
+            # 任务前置检查：禁止用旧 Index 验证 → Freshness 分级自动维护；REQUIRED 硬停
             emit("index_decision", "completed", "sync_index: project changed since index")
             from agentx.index.sync import sync_index
 
             emit("index_sync", "running", "syncing project knowledge")
             sync_result = sync_index(root, origin=origin, progress=progress)
             emit("index_sync", "completed", f"{sync_result['level']}: {sync_result['message']}")
+            if sync_result.get("action") == "reindex_required":
+                freshness = sync_result.get("index_freshness") or {}
+                return {
+                    "error": (
+                        "工程变化需完整重建 Index 后才能验证"
+                        f"（原因: {freshness.get('reason', sync_result.get('message', ''))}）。"
+                        "请先 action=reindex。"
+                    ),
+                    "index_status": "REINDEX_REQUIRED",
+                    "index_freshness": freshness,
+                    "requires_confirmation": True,
+                }
         else:
             from agentx.runtime.context import decide_index_action
 

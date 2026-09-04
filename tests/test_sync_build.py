@@ -261,18 +261,19 @@ def test_sync_index_l1_incremental_preserves_knowledge(tmp_path: Path) -> None:
     old_fingerprint = index.project_fingerprint
     old_symbols = index.symbols
 
-    (tmp_path / "param.c").write_text("// 内部修改\nint changed;\n", encoding="utf-8")
+    # Phase 8.2：纯注释修改 → L0 fingerprint_only（VALID），认知保留
+    (tmp_path / "param.c").write_text("// 内部修改\n", encoding="utf-8")
     diff = (
         "diff --git a/param.c b/param.c\n"
         "--- a/param.c\n"
         "+++ b/param.c\n"
-        "@@ -1,1 +1,2 @@\n"
+        "@@ -1,1 +1,1 @@\n"
         "-// TODO\n"
         "+// 内部修改\n"
     )
     result = sync_index(tmp_path, diff=diff)
-    assert result["level"] == "L1"
-    assert result["action"] == "incremental"
+    assert result["level"] == "L0"
+    assert result["action"] == "fingerprint_only"
 
     after = load_index(tmp_path)
     assert after is not None
@@ -284,7 +285,7 @@ def test_sync_index_l1_incremental_preserves_knowledge(tmp_path: Path) -> None:
     assert status == IndexStatus.VALID
 
 
-def test_sync_index_l3_rebuilds_knowledge(tmp_path: Path) -> None:
+def test_sync_index_l3_adds_file_incremental(tmp_path: Path) -> None:
     _make_c_project(tmp_path)
     index, _ = enrich_index(tmp_path)
     from agentx.index.index import save_index
@@ -300,9 +301,9 @@ def test_sync_index_l3_rebuilds_knowledge(tmp_path: Path) -> None:
         "@@ -0,0 +1,2 @@\n"
         "+int sensor_read(void) { return 0; }\n"
     )
+    # Phase 8.2：少量文件新增 → 文件级增量（不 full reindex）
     result = sync_index(tmp_path, diff=diff)
-    assert result["level"] == "L3"
-    assert result["action"] == "rebuild"
+    assert result["action"] == "incremental"
     after = load_index(tmp_path)
     assert after is not None
     # 新文件进入 Index（filescan 降级：符号不新增，但文件清单更新）

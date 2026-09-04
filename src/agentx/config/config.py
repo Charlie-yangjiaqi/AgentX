@@ -43,6 +43,8 @@ class AgentXConfig(AgentXModel):
     agents: dict[str, AgentModelConfig] = {}
     # Phase 7.8.1：semantic 稳定性配置（可选，默认值兜底）
     semantic: dict[str, Any] = {}
+    # Phase 8.2：Index Freshness 阈值配置（source_large_files/scope_impact_*/build_impact_*）
+    freshness: dict[str, Any] = {}
     # LLM Provider 配置（agentx config api；key 存 ~/.agentx/.env，此处只存引用）
     llm: dict[str, Any] = {}
 

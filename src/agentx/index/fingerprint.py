@@ -47,6 +47,11 @@ SOURCE_EXTS = {
     ".yml",
 }
 
+# 代码内容扩展名（Freshness 判定用）：排除配置文件型（yaml/toml/json）。
+# 这些文件的变化才可能进入"代码修改"决策；纯配置（scope yaml / pyproject.toml）
+# 由各自的指纹（scope_fingerprint / build fp）独立归因，不混进 source_fingerprint。
+CODE_SOURCE_EXTS = SOURCE_EXTS - {".toml", ".yaml", ".yml"}
+
 # 排除目录
 EXCLUDE_DIRS = {
     ".git",
@@ -61,6 +66,58 @@ EXCLUDE_DIRS = {
     ".mypy_cache",
     ".ruff_cache",
 }
+
+
+def _walk_code_files(
+    project_root: Path, extra_excludes: set[str] | None = None
+) -> list[Path]:
+    """递归收集参与 source 指纹的代码文件（scope-agnostic：不应用 scope ignore）。
+
+    Phase 8.2：source_fingerprint 必须与 scope 独立归因——scope 配置变化不得伪装成
+    源码变化。因此此处不调用 ScopeResolver（scope 归因由 scope_fingerprint 单独承担）。
+    """
+    root = project_root.resolve()
+    excludes = EXCLUDE_DIRS | (extra_excludes or set())
+    files: list[Path] = []
+    for p in root.rglob("*"):
+        if not p.is_file():
+            continue
+        if any(part in excludes for part in p.parts):
+            continue
+        if p.suffix in CODE_SOURCE_EXTS:
+            files.append(p)
+    files.sort(key=lambda p: str(p).lower())
+    return files
+
+
+def compute_source_fingerprint(
+    project_root: Path, max_files: int = 2000, extra_excludes: set[str] | None = None
+) -> str:
+    """代码内容指纹：源码文件内容（scope-agnostic，独立归因）。
+
+    与 compute_fingerprint 的区别：
+    - 不含配置文件内容（scope yaml / uvprojx / Makefile 等）——那些分别由
+      scope_fingerprint / build_scope_fingerprint 独立归因
+    - 不含 scope ignore 过滤——scope 变化（增删 ignore/third_party）不得改变
+      source_fingerprint（Phase 8.2 独立归因原则）
+    用于 Freshness 的 source 变化幅度判定。
+    """
+    from agentx.index.index import index_exclude_name
+
+    root = project_root.resolve()
+    files = _walk_code_files(
+        root, extra_excludes=(extra_excludes or set()) | {index_exclude_name(root)}
+    )
+    digester = hashlib.sha256()
+    for p in files[:max_files]:
+        rel = str(p.relative_to(root)).replace("\\", "/")
+        digester.update(rel.encode("utf-8"))
+        try:
+            data = p.read_bytes()
+        except OSError:
+            data = b""
+        digester.update(hashlib.sha256(data).digest())
+    return digester.hexdigest()[:8]
 
 
 def compute_fingerprint(

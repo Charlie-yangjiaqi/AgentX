@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import json
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ from agentx.index.index import (
     IndexStatus,
     ProjectIndex,
     create_index,
+    index_exclude_name,
     index_path,
     index_status,
     load_index,
@@ -256,17 +258,31 @@ def is_skeleton_index(index: ProjectIndex | None) -> bool:
     )
 
 
-def enrich_index(project_root: Path) -> tuple[ProjectIndex, ProjectGraph]:
-    """Project Understanding Layer：CodeGraph + Build Info + File Analysis 融合进 Index。
+def _graph_from_index(index: ProjectIndex) -> ProjectGraph:
+    """从已融合 Index 重建一个 ProjectGraph 视图（增量复用路径使用，不重扫）。"""
+    return ProjectGraph(
+        source=index.codegraph_source or "filescan",
+        files=[
+            {"path": f.path, "scope_type": f.scope_type, "scope_name": f.scope_name}
+            for f in index.files
+        ],
+        symbols=list(index.symbols),
+        call_graph=list(index.call_graph),
+        include_map=dict(index.include_map or {}),
+        build_info=dict(index.build_info or {}),
+        errors=list(index.errors),
+    )
 
-    返回 (更新后的 Index, 项目图)。CodeGraph 不可用时降级文件扫描。
-    Build Reality：参与构建的文件 compile_status=compiled；工程明确排除的
-    =excluded；有构建配置但未收录的=not_compiled；无构建配置=unknown。
+
+def _index_files_and_build(
+    root: Path, graph: ProjectGraph
+) -> tuple[list[dict[str, Any]], dict[str, Any], Any]:
+    """文件级分类 + Build Reality 融合（enrich_index 与 incremental_update 共用）。
+
+    返回 (files_metas, build_info, build_view)。
+    文件分类优先级：ignored > third_party > build-project > non_build。
     """
     import hashlib
-
-    root = project_root.resolve()
-    graph = analyze_project(root)
 
     build_info = graph.build_info
     # 构建配置文件的当前 hash：无 git 时用于检测 L4 级变化
@@ -310,9 +326,6 @@ def enrich_index(project_root: Path) -> tuple[ProjectIndex, ProjectGraph]:
         return "not_compiled" if has_build else "unknown"
 
     # Phase 7.10 Build Scope：以 Keil Active Target source list 为主 Index 工程边界。
-    # 文件分类优先级：ignored > third_party > build-project > non_build。
-    # build 解析失败/多 Target 未确认 → build_scope 记录 unresolved（不伪装），
-    # 文件分类退回 scope 目录规则（兼容旧行为）。
     from agentx.scope.build_scope import (
         build_scope_summary,
         classify_build_scope,
@@ -354,6 +367,23 @@ def enrich_index(project_root: Path) -> tuple[ProjectIndex, ProjectGraph]:
 
     build_scope_note = build_scope_summary(build_view, classified, 0)
     build_info = {**build_info, "build_scope": build_scope_note}
+    return files, build_info, build_view
+
+
+def enrich_index(project_root: Path) -> tuple[ProjectIndex, ProjectGraph]:
+    """Project Understanding Layer：CodeGraph + Build Info + File Analysis 融合进 Index。
+
+    返回 (更新后的 Index, 项目图)。CodeGraph 不可用时降级文件扫描。
+    Build Reality：参与构建的文件 compile_status=compiled；工程明确排除的
+    =excluded；有构建配置但未收录的=not_compiled；无构建配置=unknown。
+
+    Phase 8.2：小变化走 incremental_update（incremental.py）；enrich_index 是完整
+    认知重建（reindex）的唯一执行体。
+    """
+    root = project_root.resolve()
+    graph = analyze_project(root)
+
+    files, build_info, build_view = _index_files_and_build(root, graph)
 
     old = load_index(root)
     # Phase 7.6：Tree-sitter 语义补充（signature/struct members/enum values/macro）
@@ -452,10 +482,31 @@ def enrich_index(project_root: Path) -> tuple[ProjectIndex, ProjectGraph]:
         errors=graph.errors + semantic_errors,
     )
     index.capabilities = capabilities
-    # Phase 8.1：scope 是 Index 语义的一级依赖——记录本次生成用的 scope 指纹
+    return finalize_index(root, index, old, graph, indirect_calls, type_semantics)
+
+
+def finalize_index(
+    root: Path,
+    index: ProjectIndex,
+    old: ProjectIndex | None,
+    graph: ProjectGraph,
+    indirect_calls: list[dict[str, Any]],
+    type_semantics: dict[str, Any],
+) -> tuple[ProjectIndex, ProjectGraph]:
+    """Index 收尾共用（enrich_index 与 incremental_update）：
+    指纹落库 + 间接调用/类型语义 + 模块层 + 保存。
+    """
+    # Phase 8.1/8.2：记录本次生成用的三类指纹（Index 语义的一级依赖）
+    from agentx.index.fingerprint import compute_source_fingerprint
+    from agentx.scope.build_scope import compute_build_scope_fingerprint
     from agentx.scope.config import compute_scope_fingerprint
 
     index.scope_fingerprint = compute_scope_fingerprint(root)
+    index.source_fingerprint = compute_source_fingerprint(
+        root, extra_excludes={index_exclude_name(root)}
+    )
+    index.build_scope_fingerprint = compute_build_scope_fingerprint(root)
+    index.last_index_time = datetime.now(UTC)
     # Phase 7.7.3：函数注册/绑定事实（独立于 CodeGraph call_graph，不承诺调用）
     index.indirect_calls = indirect_calls
     # Phase 7.7.4：类型语义（数据模型级理解事实，独立于 symbols）
@@ -599,6 +650,7 @@ class PlanService:
         emit("index_check", "running", "checking fingerprint")
         if progress is not None:
             progress("[1/5] 检查 Project Index / 指纹")
+        skip_enrich = False
         before_status, before_reason, _ = ensure_index(
             root, force_rebuild=force_rebuild, scope_selections=scope_selections
         )
@@ -669,12 +721,47 @@ class PlanService:
             )
             if progress is not None:
                 progress(f"  外部变化已同步: {sync_result['message']}")
+            # Phase 8.2：REINDEX_REQUIRED → 硬停（没有可信整体认知，不出高风险方案）
+            if sync_result.get("action") == "reindex_required":
+                freshness = sync_result.get("index_freshness") or {}
+                emit("index_sync", "completed", "reindex_required")
+                return {
+                    "status": "reindex_required",
+                    "index_scope": "reindex_required",
+                    "message": (
+                        "当前工程变化超过增量更新能力，需先完整重建 Index 才能继续规划。"
+                        f"原因: {freshness.get('reason', sync_result.get('message', ''))}"
+                    ),
+                    "index_freshness": freshness,
+                    "requires_confirmation": True,
+                    "recommend_reindex": True,
+                    "index_before": {"status": str(before_status), "reason": before_reason},
+                    "index_after": {
+                        "status": "REINDEX_REQUIRED",
+                        "reason": freshness.get("reason", ""),
+                    },
+                }
+            # Phase 8.2：小/中变化已自动增量 → 直接复用同步后的新鲜 Index，
+            # 跳过下方全量 enrich（工程知识库自维护：不重复全量重扫）。
+            if sync_result.get("action") in ("incremental", "reclassify"):
+                fresh_index = load_index(root)
+                if fresh_index is not None and not is_skeleton_index(fresh_index):
+                    emit(
+                        "index_sync",
+                        "completed",
+                        f"{sync_result['action']} applied, reusing fresh index",
+                    )
+                    index = fresh_index
+                    graph = _graph_from_index(index)
+                    skip_enrich = True
 
         if progress is not None:
             progress("[2/5] 项目分析（CodeGraph / 构建信息 / 文件分析）")
         emit("codegraph_analysis", "running", "analyzing symbols / build info")
-        # Project Understanding Layer：CodeGraph + Build + File Analysis 融合
-        index, graph = enrich_index(root)
+        # Phase 8.2：STALE 增量已应用 → 复用新鲜 Index，跳过全量 enrich
+        if not skip_enrich:
+            # Project Understanding Layer：CodeGraph + Build + File Analysis 融合
+            index, graph = enrich_index(root)
         # Index Pipeline Reliability：semantic runtime 诊断 + Quality Gate + Scope Report
         from agentx.quality import compute_quality, compute_scope_report
         from agentx.scope.ignore import ignored_dirs

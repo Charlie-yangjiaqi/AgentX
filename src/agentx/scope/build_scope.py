@@ -197,6 +197,28 @@ def classify_build_scope(
     return out
 
 
+def compute_build_scope_fingerprint(project_root: Path) -> str | None:
+    """Build Scope 指纹：当前 Active Target 的规范化编译边界。
+
+    只包含 已解析 active target 的 compiled 文件集合 + target 名（排序 hash），
+    不含 uvprojx 全文——他 Target 的编辑不影响当前 Index 的 build 指纹。
+    无 Keil 工程 / 未解析 → None（build 非决定性边界，不参与 freshness 归因）。
+    """
+    import hashlib
+    import json
+
+    view = resolve_keil_build(project_root)
+    if view.project_file is None or not view.resolved:
+        return None
+    canonical = {
+        "target": view.target,
+        "compiled": sorted(view.build_files),
+        "excluded": sorted(view.excluded_files),
+    }
+    blob = json.dumps(canonical, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:8]
+
+
 def build_scope_summary(
     view: KeilBuildView,
     classified: dict[str, dict[str, Any]],

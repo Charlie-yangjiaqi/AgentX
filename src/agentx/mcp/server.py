@@ -176,6 +176,28 @@ def _wrap(
     }
     # Phase 8.1：权限元数据注入（顶层 operation_class/changes_code/requires_decision_gate）
     out = _decorate(workflow, out)
+    # Phase 8.2：所有 action 顶层带 index_freshness（result 已含时沿用，否则从
+    # runtime index_state 派生——保证 READ/INDEX_WRITE 响应都能判断新鲜度）
+    if "index_freshness" not in out:
+        res_fresh = None
+        if isinstance(result, dict):
+            if result.get("index_freshness"):
+                res_fresh = result.get("index_freshness")
+            elif result.get("action") == "incremental":
+                res_fresh = {
+                    "state": "AUTO_UPDATED",
+                    "recommend_reindex": False,
+                    "requires_confirmation": False,
+                    "reason": result.get("message", "incremental update applied"),
+                }
+        if res_fresh is None:
+            res_fresh = {
+                "state": state.value,
+                "recommend_reindex": state.value == "STALE",
+                "requires_confirmation": state.value == "STALE",
+                "reason": "index state after action",
+            }
+        out["index_freshness"] = res_fresh
     # 业务错误（如缺 Plan）同时暴露在顶层，兼容旧客户端
     if isinstance(result, dict) and result.get("error"):
         out["error"] = result["error"]
@@ -299,6 +321,31 @@ async def _action_scope_update(
     selections = scope_selections or {}
     preview = preview_scope_change(root, selections)
     target = apply_scope_selections(root, selections)
+    # Phase 8.2：scope 修改后的预期 freshness（不执行 reindex，但告知影响幅度与
+    # 需要的后续动作：小影响 → 自动 reclassify；大影响 → REINDEX_REQUIRED）
+    from agentx.index.freshness import freshness_config
+
+    cfg = freshness_config()
+    moved = preview.get("moved_count", 0)
+    total = sum((preview.get("after") or {}).values())
+    base = max(total, 1)
+    large = moved > cfg["scope_impact_files"] or (moved / base) > cfg["scope_impact_ratio"]
+    if large:
+        freshness_preview = {
+            "state": "REINDEX_REQUIRED",
+            "recommend_reindex": True,
+            "requires_confirmation": True,
+            "reason": f"scope change moves {moved} files — full reindex required",
+        }
+        next_step = "调用 action=reindex 完整重建（此影响超过增量能力）"
+    else:
+        freshness_preview = {
+            "state": "AUTO_UPDATED",
+            "recommend_reindex": False,
+            "requires_confirmation": False,
+            "reason": f"scope change moves {moved} files — auto reclassify eligible",
+        }
+        next_step = "调用 action=sync 自动 reclassify，或 action=reindex 立即生效"
     return {
         "status": "updated",
         "scope_changed": True,
@@ -306,7 +353,8 @@ async def _action_scope_update(
         "scope_fingerprint": compute_scope_fingerprint(root),
         "config_file": SCOPE_CONFIG_FILENAME,
         "preview": preview,
-        "next": "调用 action=reindex 使新 scope 生效（Index 尚未重建）",
+        "index_freshness": freshness_preview,
+        "next": next_step,
     }
 
 
@@ -318,48 +366,81 @@ async def _action_reindex(
     events: EventCollector | None = None,
     scope_selections: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Phase 8.1 INDEX_WRITE：强制重建 Index（invalidate → CodeGraph → enrich → module）。
+    """Phase 8.1/8.2 INDEX_WRITE：完整认知重建的唯一入口（reindex）。
 
+    流程：scope classify → build boundary → codegraph → semantic → type semantic
+    → module discovery → module understanding → impact metadata → fingerprints。
     使用磁盘上最新的 scope 配置（scope_fingerprint 比较，杜绝旧 scope 缓存）。
     只重建 AgentX 自身认知产物，不修改用户源码 → 不触发 CODE_WRITE 审批。
+
+    注意：reindex 不应被普通 action 隐式调用；只允许用户主动调用或
+    用户确认 REINDEX_REQUIRED 后调用。
     """
-    from agentx.index.sync import sync_index
+    from agentx.index.index import index_status
+    from agentx.plan.service import enrich_index
 
-    # sync_index 内部：scope_fingerprint 变化 → scope_rebuild；否则全量 enrich。
-    # 传 scope_selections（scope_update 刚写入过时可不传，读取最新磁盘配置）。
-    result = sync_index(
-        root := app.project_root,
-        origin=origin or "agentx_index_write",
-        scope_selections=scope_selections,
-    )
-    from agentx.index.index import index_status, load_index
+    root = app.project_root
+    # scope 前置（reindex 前必须通过 scope gate；未确认不重建）
+    from agentx.scope.initializer import apply_scope_selections, check_scope_init
 
+    gate = check_scope_init(root)
+    if gate is not None and scope_selections is None:
+        return {
+            "status": "scope_required",
+            "reason": "first_project_index_without_scope",
+            "message": gate["message"],
+            "suggestions": gate["suggestions"],
+        }
+    if gate is not None:
+        apply_scope_selections(root, scope_selections)
+    # build target 确认门禁
+    from agentx.scope.initializer import check_build_target_init
+
+    btg = check_build_target_init(root)
+    if btg is not None and not (scope_selections or {}).get("build_target"):
+        return {
+            "status": "build_target_required",
+            "reason": "keil_multi_target_unselected",
+            "message": btg["message"],
+            "build_targets": btg["build_targets"],
+        }
+    if btg is not None and (scope_selections or {}).get("build_target"):
+        apply_scope_selections(root, scope_selections)
+
+    index, graph = enrich_index(root)
     status, reason = index_status(root)
-    idx = load_index(root)
-    from agentx.scope.config import compute_scope_fingerprint
+    from collections import Counter
 
+    counts = Counter(f.scope_type for f in index.files)
+    bs = (index.build_info or {}).get("build_scope") or {}
     out: dict[str, Any] = {
-        **result,
         "status": "completed",
+        "action": "reindex",
         "index_status": status.value,
         "index_reason": reason,
-        "fingerprint": idx.project_fingerprint if idx else None,
-        "scope_fingerprint": idx.scope_fingerprint if idx else compute_scope_fingerprint(root),
-    }
-    # scope_summary：project/third_party/non_build/ignored
-    if idx is not None:
-        from collections import Counter
-
-        counts = Counter(f.scope_type for f in idx.files)
-        out["scope_summary"] = {
+        "message": (
+            f"完整重建完成（{graph.source}，{index.file_count} 文件，"
+            f"{len(index.symbols)} 符号）"
+        ),
+        "fingerprint": index.project_fingerprint,
+        "scope_fingerprint": index.scope_fingerprint,
+        "source_fingerprint": index.source_fingerprint,
+        "build_scope_fingerprint": index.build_scope_fingerprint,
+        "scope_summary": {
             "project": counts.get("project", 0),
             "third_party": counts.get("third_party", 0),
             "non_build": counts.get("non_build", 0),
             "ignored": counts.get("ignored", 0),
-        }
-        bs = (idx.build_info or {}).get("build_scope") or {}
-        if bs:
-            out["build_scope"] = bs
+        },
+        "index_freshness": {
+            "state": "VALID",
+            "recommend_reindex": False,
+            "requires_confirmation": False,
+            "reason": "full reindex completed",
+        },
+    }
+    if bs:
+        out["build_scope"] = bs
     return out
 
 
@@ -371,7 +452,7 @@ async def _action_status(
     events: EventCollector | None = None,
     scope_selections: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    # 任务前置检查：STALE → Index Sync（外部变化生成报告）
+    # 任务前置检查：Freshness 判定 + 自动维护 ≤ Level 2（REQUIRED 不越权重建）
     from agentx.index.sync import ensure_synced
 
     status, reason, sync_result = ensure_synced(app.project_root, origin=origin)
@@ -383,6 +464,15 @@ async def _action_status(
         "index_reason": reason,
         "plan": plan.model_dump() if plan else None,
     }
+    # Phase 8.2：REQUIRED → 明确告诉用户需完整重建（不偷偷 reindex）
+    if sync_result is not None and sync_result.get("action") == "reindex_required":
+        out["index_freshness"] = sync_result.get("index_freshness") or {}
+        out["requires_confirmation"] = True
+        out["recommend_reindex"] = True
+    else:
+        out["index_freshness"] = {"state": status, "recommend_reindex": False,
+                                  "requires_confirmation": False,
+                                  "reason": reason}
     # Phase 7.10：Build Scope 边界摘要（target/project/non_build/third_party）
     from agentx.index.index import load_index
 
@@ -536,6 +626,39 @@ async def _action_build_status(
     return build_status_from_info(index.build_info or {})
 
 
+async def _action_human_index(
+    app: Application,
+    task: str,
+    origin: str = "unknown",
+    force_rebuild: bool = False,
+    events: EventCollector | None = None,
+    scope_selections: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Phase 8.3 INDEX_WRITE：Human Project Knowledge 生成/刷新/状态。
+
+    task = generate | refresh | status（默认 generate）。
+    - generate：生成 PROJECT_OVERVIEW / ARCHITECTURE / MODULES + manifest
+    - refresh：按 manifest knowledge_dependencies 只刷新受影响文档
+    - status：查看 Human Index 状态
+    生命周期：Index MISSING→bootstrap；STALE→8.2 freshness（小自动/大 REQUIRED）；
+    REINDEX_REQUIRED→不偷跑 reindex，返回当前状态。
+    """
+    from agentx.human.service import HumanKnowledgeService
+
+    svc = HumanKnowledgeService(app.project_root, app=app)
+    sub = (task or "generate").strip().lower()
+    if sub in ("status", "state"):
+        return svc.status()
+    if sub == "refresh":
+        return await svc.refresh(
+            force_rebuild=force_rebuild, scope_selections=scope_selections
+        )
+    # default generate
+    return await svc.generate(
+        force_rebuild=force_rebuild, scope_selections=scope_selections, with_prose=True
+    )
+
+
 _ActionFn = Callable[..., Awaitable[dict[str, Any]]]
 
 _ACTIONS: dict[str, _ActionFn] = {
@@ -551,6 +674,7 @@ _ACTIONS: dict[str, _ActionFn] = {
     "query": _action_query,
     "search_feature": _action_search_feature,
     "build_status": _action_build_status,
+    "human_index": _action_human_index,
 }
 
 # Phase 8.1 权限模型：每个 action 的写权限分类（宿主 AI 据此决定是否需要代码审批）。
@@ -569,6 +693,11 @@ OPERATION_METADATA: dict[str, dict[str, Any]] = {
         "requires_decision_gate": False,
     },
     "reindex": {"class": "INDEX_WRITE", "changes_code": False, "requires_decision_gate": False},
+    "human_index": {
+        "class": "INDEX_WRITE",
+        "changes_code": False,
+        "requires_decision_gate": False,
+    },
     "review": {"class": "READ", "changes_code": False, "requires_decision_gate": False},
     "verify": {"class": "READ", "changes_code": False, "requires_decision_gate": False},
     "plan": {"class": "CODE_WRITE_PREVIEW", "changes_code": True, "requires_decision_gate": True},
@@ -594,7 +723,7 @@ def _decorate(action: str, out: dict[str, Any]) -> dict[str, Any]:
 # build 类 action：Index=MISSING 且项目规模 ≥ 阈值时后台化
 # （避免大项目长任务卡 300s RPC；小项目走同步路径保留 progress 流）
 # Phase 8.1：reindex 是大项目最重操作，同样后台化；scope_update 只写配置，保持同步。
-_BUILD_ACTIONS = {"auto", "plan", "sync", "understand", "reindex"}
+_BUILD_ACTIONS = {"auto", "plan", "sync", "understand", "reindex", "human_index"}
 _JOB_SOURCE_THRESHOLD = 200  # 源文件数 ≥ 此值 → 后台任务
 # 短同步窗口：后台任务在此时间内完成 → 同步返回结果（测试/小项目体验不变）
 _SYNC_WINDOW_SECONDS = 5.0
@@ -726,6 +855,10 @@ def _job_status_view(job: Any) -> dict[str, Any]:
         "third_party/build_target，写 AgentX 自身配置，不需代码审批）/ "
         "reindex（Phase 8.1 INDEX_WRITE：强制重建 Index，使用最新 scope，"
         "不需代码审批）/ "
+        "human_index（Phase 8.3 INDEX_WRITE：生成/刷新工程师可读项目知识文档 "
+        "PROJECT_OVERVIEW/ARCHITECTURE/MODULES，位于 <project>_codebase_index/human/；"
+        "task=generate|refresh|status，默认 generate；project_understanding 缺失自动补齐；"
+        "REINDEX_REQUIRED 不偷跑 full reindex）/ "
         "status（Index 状态与项目认知概览）。"
         "【权限边界】每次返回顶层带 operation_class（READ/INDEX_WRITE/"
         "CODE_WRITE_PREVIEW/CODE_WRITE）+ changes_code + requires_decision_gate。"

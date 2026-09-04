@@ -68,6 +68,12 @@ class ProjectIndex(AgentXModel):
     # Phase 8.1：scope 是 Index 语义的一级依赖——记录生成时用的 scope 配置指纹，
     # scope 变化必须强制 reclassify + enrich（不靠源码增删启发式）。
     scope_fingerprint: str | None = None
+    # Phase 8.2 Index Freshness：三类可独立归因指纹 + 最后同步/重建时间。
+    # source_fingerprint：代码内容（不含配置）；build_scope_fingerprint：active target
+    # compiled 边界；last_index_time：最近一次认知写入时间（enrich/sync/reindex）。
+    source_fingerprint: str | None = None
+    build_scope_fingerprint: str | None = None
+    last_index_time: datetime | None = None
     errors: list[str] = []
 
 
@@ -168,10 +174,11 @@ def create_index(
         metas = [IndexFileMeta(path=f, status="active", compiled=False) for f in all_files]
     else:
         metas = [_meta_from_dict(f) for f in files]
-    return ProjectIndex(
+    now = datetime.now(UTC)
+    index = ProjectIndex(
         project_fingerprint=fingerprint,
         index_version=INDEX_VERSION,
-        generated_at=datetime.now(UTC),
+        generated_at=now,
         file_count=len(metas),
         files=metas,
         symbols=symbols or [],
@@ -181,6 +188,23 @@ def create_index(
         codegraph_source=codegraph_source,
         errors=errors or [],
     )
+    # Phase 8.2：记录三类独立指纹（骨架也需 freshness 基线，enrich 时刷新）
+    _record_fingerprints(index, root)
+    index.last_index_time = now
+    return index
+
+
+def _record_fingerprints(index: ProjectIndex, root: Path) -> None:
+    """把当前磁盘的三类指纹写入 Index（scope/source/build_scope）。"""
+    from agentx.index.fingerprint import compute_source_fingerprint
+    from agentx.scope.build_scope import compute_build_scope_fingerprint
+    from agentx.scope.config import compute_scope_fingerprint
+
+    index.scope_fingerprint = compute_scope_fingerprint(root)
+    index.source_fingerprint = compute_source_fingerprint(
+        root, extra_excludes={index_exclude_name(root)}
+    )
+    index.build_scope_fingerprint = compute_build_scope_fingerprint(root)
 
 
 def _meta_from_dict(data: dict[str, Any]) -> IndexFileMeta:

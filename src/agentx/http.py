@@ -17,7 +17,7 @@ def agentx_version() -> str:
     try:
         return metadata.version("agentx")
     except metadata.PackageNotFoundError:
-        return "0.1.0"
+        return "0.2.0"
 
 
 def default_user_agent() -> str:

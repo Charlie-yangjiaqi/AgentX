@@ -96,7 +96,9 @@ def test_ensure_synced_stale_syncs(tmp_path: Path) -> None:
 
     (tmp_path / "param.c").write_text("int changed;\n", encoding="utf-8")
     status, reason, sync_result = ensure_synced(tmp_path, origin="external")
-    assert status == "STALE"
-    assert "已同步" in reason
+    # Phase 8.2：小源码变化 → 自动增量更新后 Index 回到 VALID（工程知识库自维护）
+    assert status == "VALID"
+    assert "已同步" in reason or "incremental" in reason or "增量" in reason
     assert sync_result is not None
     assert sync_result["report_dir"] is not None
+    assert sync_result["index_freshness"]["state"] in ("AUTO_UPDATED", "VALID")
