@@ -230,7 +230,7 @@ This repository is registered in the Reasonix skill/market via
 {
   "apiVersion": "reasonix.io/plugin/v2",
   "name": "agentx",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "contributes": {
     "mcpServers": {
       "agentx": { "command": "agentx-mcp" }
