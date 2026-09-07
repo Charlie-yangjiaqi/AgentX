@@ -1,0 +1,14 @@
+{
+  "apiVersion": "reasonix.io/plugin/v2",
+  "name": "agentx",
+  "version": "0.2.0",
+  "description": "Evidence-based engineering layer for embedded firmware: persistent project index, plan / review / verify, index freshness, and human-readable project knowledge (PROJECT_OVERVIEW / ARCHITECTURE / MODULES).",
+  "contributes": {
+    "mcpServers": {
+      "agentx": {
+        "command": "agentx-mcp",
+        "args": []
+      }
+    }
+  }
+}

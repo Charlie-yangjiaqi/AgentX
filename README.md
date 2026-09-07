@@ -220,6 +220,28 @@ Example call:
 4. agentx(action=verify)  → PASS/FAIL, judged by machine evidence
 ```
 
+### Reasonix plugin
+
+This repository is registered in the Reasonix skill/market via
+`reasonix-plugin.json` (Manifest v2). It declares one stdio MCP server named
+`agentx`:
+
+```json
+{
+  "apiVersion": "reasonix.io/plugin/v2",
+  "name": "agentx",
+  "version": "0.2.0",
+  "contributes": {
+    "mcpServers": {
+      "agentx": { "command": "agentx-mcp" }
+    }
+  }
+}
+```
+
+Prerequisite: the `agentx-mcp` console entry must be on `PATH`. Install it
+with `uv tool install agentx` (or run from this repo with `uv run agentx-mcp`).
+
 ## CLI overview
 
 ```bash
